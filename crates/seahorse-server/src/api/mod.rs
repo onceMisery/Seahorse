@@ -176,6 +176,15 @@ pub struct HealthResponseData {
     pub version: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct StatsResponseData {
+    pub chunk_count: usize,
+    pub tag_count: usize,
+    pub deleted_chunk_count: usize,
+    pub repair_queue_size: usize,
+    pub index_status: String,
+}
+
 pub fn success<T>(data: T) -> (StatusCode, Json<ResponseEnvelope<T>>)
 where
     T: Serialize,

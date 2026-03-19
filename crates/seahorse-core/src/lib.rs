@@ -25,7 +25,7 @@ pub use storage::{
     ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedChunk, PersistedFile,
     MaintenanceJob, PersistedDeletion, PersistedIngest, PersistedReplacement,
     RecallChunkRecord, RebuildChunkRecord, SchemaExpectation, SchemaMetaSnapshot,
-    SqliteRepository, StorageError, StorageResult, TagWrite, LATEST_SCHEMA_VERSION,
+    SqliteRepository, StorageError, StorageResult, StorageStatsSnapshot, TagWrite, LATEST_SCHEMA_VERSION,
     read_schema_meta,
     validate_schema_meta,
 };

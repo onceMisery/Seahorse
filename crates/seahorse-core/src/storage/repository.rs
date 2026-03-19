@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use super::models::{
     ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedChunk, PersistedFile,
     MaintenanceJob, PersistedDeletion, PersistedIngest, PersistedReplacement,
-    RecallChunkRecord, RebuildChunkRecord, TagWrite,
+    RecallChunkRecord, RebuildChunkRecord, StorageStatsSnapshot, TagWrite,
 };
 use super::schema::{validate_schema_meta, SchemaExpectation, SchemaMetaSnapshot};
 use super::{StorageError, StorageResult};
@@ -514,6 +514,55 @@ impl SqliteRepository {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn load_stats(&self, namespace: &str) -> StorageResult<StorageStatsSnapshot> {
+        let chunk_count = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             WHERE c.namespace = ?1
+               AND f.namespace = ?1
+               AND c.is_deleted = 0
+               AND c.index_status != 'deleted'
+               AND f.ingest_status != 'deleted'",
+            [namespace],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let tag_count = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM tags
+             WHERE namespace = ?1",
+            [namespace],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let deleted_chunk_count = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM chunks
+             WHERE namespace = ?1
+               AND (is_deleted = 1 OR index_status = 'deleted')",
+            [namespace],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let repair_queue_size = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM repair_queue
+             WHERE namespace = ?1
+               AND status IN ('pending', 'running')",
+            [namespace],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let index_status = self
+            .get_schema_meta_value("index_state")?
+            .unwrap_or_else(|| "ready".to_owned());
+
+        Ok(StorageStatsSnapshot {
+            chunk_count: chunk_count.max(0) as usize,
+            tag_count: tag_count.max(0) as usize,
+            deleted_chunk_count: deleted_chunk_count.max(0) as usize,
+            repair_queue_size: repair_queue_size.max(0) as usize,
+            index_status,
+        })
     }
 
     fn list_tags_by_chunk_id(&self, chunk_id: i64) -> StorageResult<Vec<String>> {
@@ -1206,5 +1255,47 @@ mod tests {
 
         assert_eq!(file.ingest_status, "ready");
         assert_eq!(index_state.as_deref(), Some("ready"));
+    }
+
+    #[test]
+    fn loads_stats_for_active_deleted_and_pending_repairs() {
+        let mut repository = repository_with_schema();
+        let batch = IngestWriteBatch {
+            file: FileWrite::new("stats.txt", "hash-stats"),
+            chunks: vec![
+                ChunkWrite::new(0, "alpha", "chunk-stats-1", "test-model", 3),
+                ChunkWrite::new(1, "beta", "chunk-stats-2", "test-model", 3),
+            ],
+            tags: vec![TagWrite::new("Project", "project")],
+            chunk_tags: vec![
+                ChunkTagInsert::new(0, "project"),
+                ChunkTagInsert::new(1, "project"),
+            ],
+        };
+
+        let persisted = repository
+            .write_ingest_batch(&batch)
+            .expect("write ingest batch");
+        let chunk_ids = persisted.chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>();
+        repository
+            .update_indexing_result(persisted.file.id, &chunk_ids, "ready", "ready")
+            .expect("mark chunks ready");
+        repository
+            .soft_delete_chunks("default", &[persisted.chunks[1].id])
+            .expect("soft delete second chunk");
+        repository
+            .enqueue_repair_task("default", "index_insert", "chunk", Some(persisted.chunks[0].id), None)
+            .expect("enqueue repair");
+        repository
+            .set_schema_meta_value("index_state", "degraded")
+            .expect("set index_state");
+
+        let stats = repository.load_stats("default").expect("load stats");
+
+        assert_eq!(stats.chunk_count, 1);
+        assert_eq!(stats.tag_count, 1);
+        assert_eq!(stats.deleted_chunk_count, 1);
+        assert_eq!(stats.repair_queue_size, 1);
+        assert_eq!(stats.index_status, "degraded");
     }
 }

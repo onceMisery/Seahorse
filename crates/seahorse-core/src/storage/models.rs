@@ -177,3 +177,12 @@ pub struct MaintenanceJob {
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageStatsSnapshot {
+    pub chunk_count: usize,
+    pub tag_count: usize,
+    pub deleted_chunk_count: usize,
+    pub repair_queue_size: usize,
+    pub index_status: String,
+}

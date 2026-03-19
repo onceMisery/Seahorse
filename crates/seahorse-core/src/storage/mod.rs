@@ -9,7 +9,7 @@ pub use migrations::{apply_sqlite_migrations, LATEST_SCHEMA_VERSION};
 pub use models::{
     ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedChunk, PersistedFile,
     MaintenanceJob, PersistedDeletion, PersistedIngest, PersistedReplacement,
-    RecallChunkRecord, RebuildChunkRecord, TagWrite,
+    RecallChunkRecord, RebuildChunkRecord, StorageStatsSnapshot, TagWrite,
 };
 pub use repository::SqliteRepository;
 pub use schema::{

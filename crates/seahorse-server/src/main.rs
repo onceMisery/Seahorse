@@ -15,6 +15,7 @@ async fn main() {
         .route("/forget", post(handlers::forget::post_forget))
         .route("/admin/rebuild", post(handlers::rebuild::post_rebuild))
         .route("/admin/jobs/{job_id}", get(handlers::jobs::get_job))
+        .route("/stats", get(handlers::stats::get_stats))
         .route("/health", get(handlers::health::get_health))
         .with_state(state);
 

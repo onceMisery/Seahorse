@@ -45,6 +45,15 @@ pub struct HealthSnapshot {
     pub embedding_provider: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct StatsSnapshot {
+    pub chunk_count: usize,
+    pub tag_count: usize,
+    pub deleted_chunk_count: usize,
+    pub repair_queue_size: usize,
+    pub index_status: String,
+}
+
 #[derive(Debug)]
 pub enum AppStateError {
     Unavailable { message: &'static str },
@@ -246,6 +255,27 @@ impl AppState {
             db: services.db_label.clone(),
             index: format!("memory-{}d", services.vector_index.dimension()),
             embedding_provider: services.embedding_provider.model_id().to_owned(),
+        })
+    }
+
+    pub fn stats_snapshot(&self) -> Result<StatsSnapshot, AppStateError> {
+        let services = self
+            .services
+            .lock()
+            .map_err(|_| AppStateError::Unavailable {
+                message: "application state lock poisoned",
+            })?;
+        let stats = services
+            .repository
+            .load_stats("default")
+            .map_err(AppStateError::Storage)?;
+
+        Ok(StatsSnapshot {
+            chunk_count: stats.chunk_count,
+            tag_count: stats.tag_count,
+            deleted_chunk_count: stats.deleted_chunk_count,
+            repair_queue_size: stats.repair_queue_size,
+            index_status: stats.index_status,
         })
     }
 }
