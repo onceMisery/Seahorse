@@ -77,9 +77,13 @@ pub enum AppStateError {
 impl AppState {
     pub fn new() -> Result<Self, String> {
         let db_path = std::env::var("SEAHORSE_DB_PATH").unwrap_or_else(|_| DEFAULT_DB_PATH.to_owned());
+        Self::new_with_db_path(&db_path)
+    }
+
+    pub(crate) fn new_with_db_path(db_path: &str) -> Result<Self, String> {
         let embedding_provider = StubEmbeddingProvider::from_dimension(DEFAULT_EMBEDDING_DIMENSION)
             .map_err(|error| format!("failed to initialize embedding provider: {error}"))?;
-        let (mut repository, bootstrap_chunks) = open_repository(&db_path)?;
+        let (mut repository, bootstrap_chunks) = open_repository(db_path)?;
         let mut vector_index = InMemoryVectorIndex::new(embedding_provider.dimension());
         let bootstrap_entries = build_bootstrap_entries(&embedding_provider, &bootstrap_chunks)?;
         vector_index
