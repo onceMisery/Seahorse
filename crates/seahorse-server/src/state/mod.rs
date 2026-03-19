@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -9,8 +10,8 @@ use seahorse_core::{
     IngestRequest as CoreIngestRequest, IngestResult as CoreIngestResult, ForgetError,
     ForgetPipeline, ForgetRequest as CoreForgetRequest, ForgetResult as CoreForgetResult,
     MaintenanceJob, RecallError, RecallPipeline, RecallRequest as CoreRecallRequest,
-    RecallResult as CoreRecallResult, RebuildError, RebuildPipeline,
-    RebuildRequest as CoreRebuildRequest, SqliteRepository, StorageError,
+    RecallResult as CoreRecallResult, RebuildChunkRecord, RebuildError,
+    RebuildRequest as CoreRebuildRequest, RebuildScope, SqliteRepository, StorageError,
     StubEmbeddingProvider, VectorIndex, apply_sqlite_migrations,
 };
 
@@ -35,6 +36,14 @@ struct BootstrapChunk {
     chunk_id: i64,
     namespace: String,
     chunk_text: String,
+}
+
+#[derive(Debug)]
+struct PreparedRebuildWork {
+    namespace: String,
+    scope: RebuildScope,
+    provider: StubEmbeddingProvider,
+    chunks: Vec<RebuildChunkRecord>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,16 +85,9 @@ impl AppState {
         vector_index
             .insert(&bootstrap_entries)
             .map_err(|error| format!("failed to warm in-memory index from sqlite: {error}"))?;
-        let initial_index_state = if repository
-            .list_missing_index_chunks("default")
-            .map_err(|error| format!("failed to inspect pending rebuild chunks: {error}"))?
-            .is_empty()
-        {
-            "ready"
-        } else {
-            "degraded"
-        };
-        sync_runtime_schema_meta(&mut repository, &embedding_provider, initial_index_state)?;
+        let initial_index_state = derive_index_state(&repository)
+            .map_err(|error| format!("failed to derive initial index state: {error}"))?;
+        sync_runtime_schema_meta(&mut repository, &embedding_provider, &initial_index_state)?;
         let db_label = if db_path == ":memory:" {
             "sqlite-memory".to_owned()
         } else {
@@ -148,86 +150,53 @@ impl AppState {
         request: CoreRebuildRequest,
         force: bool,
     ) -> Result<MaintenanceJob, AppStateError> {
-        let mut services = self
-            .services
-            .lock()
-            .map_err(|_| AppStateError::Unavailable {
-                message: "application state lock poisoned",
-            })?;
+        let job = {
+            let mut services = self
+                .services
+                .lock()
+                .map_err(|_| AppStateError::Unavailable {
+                    message: "application state lock poisoned",
+                })?;
 
-        if let Some(active_job) = services
-            .repository
-            .find_active_maintenance_job("rebuild", &request.namespace)
-            .map_err(AppStateError::Storage)?
-        {
-            if !force {
-                return Ok(active_job);
-            }
-
-            services
+            if let Some(active_job) = services
                 .repository
-                .cancel_active_maintenance_jobs(
-                    "rebuild",
-                    &request.namespace,
-                    "superseded by force rebuild request",
-                )
-                .map_err(AppStateError::Storage)?;
-        }
+                .find_active_maintenance_job("rebuild", &request.namespace)
+                .map_err(AppStateError::Storage)?
+            {
+                if !force {
+                    return Ok(active_job);
+                }
 
-        let payload_json = json!({
-            "scope": request.scope.as_str(),
-            "force": force,
-        })
-        .to_string();
-        let job = services
-            .repository
-            .create_maintenance_job("rebuild", &request.namespace, Some(&payload_json))
-            .map_err(AppStateError::Storage)?;
-        services
-            .repository
-            .mark_maintenance_job_running(job.id, Some("running"))
-            .map_err(AppStateError::Storage)?;
-
-        let provider = services.embedding_provider.clone();
-        let rebuild_result = {
-            let mut pipeline = RebuildPipeline::new(
-                &mut services.repository,
-                &provider,
-                &mut services.vector_index,
-            );
-            pipeline.rebuild(request)
-        };
-
-        match rebuild_result {
-            Ok(result) => {
-                let progress = format!("{}/{}", result.indexed_chunks, result.scanned_chunks);
-                let result_summary = format!(
-                    "scope={}, indexed_chunks={}, scanned_chunks={}",
-                    result.scope.as_str(),
-                    result.indexed_chunks,
-                    result.scanned_chunks
-                );
                 services
                     .repository
-                    .finish_maintenance_job(
-                        job.id,
-                        "succeeded",
-                        Some(&progress),
-                        Some(&result_summary),
-                        None,
+                    .cancel_active_maintenance_jobs(
+                        "rebuild",
+                        &request.namespace,
+                        "superseded by force rebuild request",
                     )
                     .map_err(AppStateError::Storage)?;
-                load_job(&services.repository, job.id)
             }
-            Err(error) => {
-                let error_message = error.to_string();
-                services
-                    .repository
-                    .finish_maintenance_job(job.id, "failed", None, None, Some(&error_message))
-                    .map_err(AppStateError::Storage)?;
-                Err(AppStateError::Rebuild(error))
-            }
+
+            let payload_json = json!({
+                "scope": request.scope.as_str(),
+                "force": force,
+            })
+            .to_string();
+            services
+                .repository
+                .create_maintenance_job("rebuild", &request.namespace, Some(&payload_json))
+                .map_err(AppStateError::Storage)?
+        };
+
+        if let Err(error) = self.spawn_rebuild_worker(job.id, request) {
+            let error_message = format!("failed to spawn rebuild worker: {error}");
+            let _ = self.fail_rebuild_submission(job.id, &job.namespace, &error_message);
+            return Err(AppStateError::Unavailable {
+                message: "failed to spawn rebuild worker",
+            });
         }
+
+        Ok(job)
     }
 
     pub fn get_job(&self, job_id: i64) -> Result<MaintenanceJob, AppStateError> {
@@ -277,6 +246,223 @@ impl AppState {
             repair_queue_size: stats.repair_queue_size,
             index_status: stats.index_status,
         })
+    }
+}
+
+impl AppState {
+    fn spawn_rebuild_worker(
+        &self,
+        job_id: i64,
+        request: CoreRebuildRequest,
+    ) -> std::io::Result<()> {
+        let state = self.clone();
+        thread::Builder::new()
+            .name(format!("seahorse-rebuild-{job_id}"))
+            .spawn(move || {
+                state.run_rebuild_job(job_id, request);
+            })
+            .map(|_| ())
+    }
+
+    fn run_rebuild_job(&self, job_id: i64, request: CoreRebuildRequest) {
+        let work = match self.prepare_rebuild_job(job_id, &request) {
+            Ok(Some(work)) => work,
+            Ok(None) => return,
+            Err(error) => {
+                let error_message = error.to_string();
+                let _ = self.fail_rebuild_submission(job_id, &request.namespace, &error_message);
+                return;
+            }
+        };
+
+        let entries = match build_rebuild_entries(&work.provider, &work.chunks) {
+            Ok(entries) => entries,
+            Err(error) => {
+                let error_message = error.to_string();
+                let _ = self.fail_rebuild_submission(job_id, &work.namespace, &error_message);
+                return;
+            }
+        };
+
+        if let Err(error) = self.apply_rebuild_result(job_id, &work, &entries) {
+            let error_message = error.to_string();
+            let _ = self.fail_rebuild_submission(job_id, &work.namespace, &error_message);
+        }
+    }
+
+    fn prepare_rebuild_job(
+        &self,
+        job_id: i64,
+        request: &CoreRebuildRequest,
+    ) -> Result<Option<PreparedRebuildWork>, AppStateError> {
+        let mut services = self
+            .services
+            .lock()
+            .map_err(|_| AppStateError::Unavailable {
+                message: "application state lock poisoned",
+            })?;
+        let job = load_job(&services.repository, job_id)?;
+        if job.status == "cancelled" {
+            return Ok(None);
+        }
+        let provider = services.embedding_provider.clone();
+        let chunks = match request.scope {
+            RebuildScope::All => services
+                .repository
+                .list_rebuild_chunks(&request.namespace)
+                .map_err(AppStateError::Storage)?,
+            RebuildScope::MissingIndex => services
+                .repository
+                .list_missing_index_chunks(&request.namespace)
+                .map_err(AppStateError::Storage)?,
+        };
+        let progress = format!("0/{}", chunks.len());
+        services
+            .repository
+            .mark_maintenance_job_running(job_id, Some(&progress))
+            .map_err(AppStateError::Storage)?;
+        services
+            .repository
+            .set_schema_meta_value("index_state", "rebuilding")
+            .map_err(AppStateError::Storage)?;
+
+        Ok(Some(PreparedRebuildWork {
+            namespace: request.namespace.clone(),
+            scope: request.scope,
+            provider,
+            chunks,
+        }))
+    }
+
+    fn apply_rebuild_result(
+        &self,
+        job_id: i64,
+        work: &PreparedRebuildWork,
+        entries: &[IndexEntry],
+    ) -> Result<(), AppStateError> {
+        let mut services = self
+            .services
+            .lock()
+            .map_err(|_| AppStateError::Unavailable {
+                message: "application state lock poisoned",
+            })?;
+        let job = load_job(&services.repository, job_id)?;
+        if job.status == "cancelled" {
+            self.restore_index_state_after_cancel(&mut services.repository, &work.namespace)?;
+            return Ok(());
+        }
+
+        match work.scope {
+            RebuildScope::All => services
+                .vector_index
+                .rebuild(entries)
+                .map_err(RebuildError::from)
+                .map_err(AppStateError::Rebuild)?,
+            RebuildScope::MissingIndex => {
+                if !entries.is_empty() {
+                    services
+                        .vector_index
+                        .insert(entries)
+                        .map_err(RebuildError::from)
+                        .map_err(AppStateError::Rebuild)?;
+                }
+            }
+        }
+
+        let chunk_ids = work.chunks.iter().map(|chunk| chunk.chunk_id).collect::<Vec<_>>();
+        services
+            .repository
+            .mark_chunks_ready(&work.namespace, &chunk_ids)
+            .map_err(AppStateError::Storage)?;
+        services
+            .repository
+            .refresh_file_statuses(&work.namespace)
+            .map_err(AppStateError::Storage)?;
+        sync_runtime_schema_meta(&mut services.repository, &work.provider, "ready")
+            .map_err(|_| AppStateError::Unavailable {
+                message: "failed to persist ready rebuild state",
+            })?;
+
+        let progress = format!("{0}/{0}", chunk_ids.len());
+        let result_summary = format!(
+            "scope={}, indexed_chunks={}, scanned_chunks={}",
+            work.scope.as_str(),
+            chunk_ids.len(),
+            chunk_ids.len()
+        );
+        services
+            .repository
+            .finish_maintenance_job(
+                job_id,
+                "succeeded",
+                Some(&progress),
+                Some(&result_summary),
+                None,
+            )
+            .map_err(AppStateError::Storage)?;
+
+        Ok(())
+    }
+
+    fn fail_rebuild_submission(
+        &self,
+        job_id: i64,
+        namespace: &str,
+        error_message: &str,
+    ) -> Result<(), AppStateError> {
+        let mut services = self
+            .services
+            .lock()
+            .map_err(|_| AppStateError::Unavailable {
+                message: "application state lock poisoned",
+            })?;
+        let job = load_job(&services.repository, job_id)?;
+        if job.status == "cancelled" {
+            self.restore_index_state_after_cancel(&mut services.repository, namespace)?;
+            return Ok(());
+        }
+
+        let fallback_index_state = derive_index_state(&services.repository)
+            .map_err(AppStateError::Storage)?;
+        services
+            .repository
+            .finish_maintenance_job(job_id, "failed", None, None, Some(error_message))
+            .map_err(AppStateError::Storage)?;
+
+        if services
+            .repository
+            .find_active_maintenance_job("rebuild", namespace)
+            .map_err(AppStateError::Storage)?
+            .is_none()
+        {
+            services
+                .repository
+                .set_schema_meta_value("index_state", &fallback_index_state)
+                .map_err(AppStateError::Storage)?;
+        }
+
+        Ok(())
+    }
+
+    fn restore_index_state_after_cancel(
+        &self,
+        repository: &mut SqliteRepository,
+        namespace: &str,
+    ) -> Result<(), AppStateError> {
+        if repository
+            .find_active_maintenance_job("rebuild", namespace)
+            .map_err(AppStateError::Storage)?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let fallback_index_state = derive_index_state(repository).map_err(AppStateError::Storage)?;
+        repository
+            .set_schema_meta_value("index_state", &fallback_index_state)
+            .map_err(AppStateError::Storage)?;
+
+        Ok(())
     }
 }
 
@@ -360,6 +546,23 @@ fn build_bootstrap_entries(
     Ok(entries)
 }
 
+fn build_rebuild_entries(
+    embedding_provider: &StubEmbeddingProvider,
+    chunks: &[RebuildChunkRecord],
+) -> Result<Vec<IndexEntry>, RebuildError> {
+    let mut entries = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let vector = embedding_provider.embed(&chunk.chunk_text)?;
+        entries.push(IndexEntry::new(
+            chunk.chunk_id,
+            chunk.namespace.clone(),
+            vector,
+        ));
+    }
+
+    Ok(entries)
+}
+
 fn sync_runtime_schema_meta(
     repository: &mut SqliteRepository,
     embedding_provider: &StubEmbeddingProvider,
@@ -386,6 +589,14 @@ fn current_index_state(repository: &SqliteRepository) -> Result<String, AppState
         .get_schema_meta_value("index_state")
         .map_err(AppStateError::Storage)?
         .unwrap_or_else(|| "ready".to_owned()))
+}
+
+fn derive_index_state(repository: &SqliteRepository) -> Result<String, StorageError> {
+    if repository.list_missing_index_chunks("default")?.is_empty() {
+        Ok("ready".to_owned())
+    } else {
+        Ok("degraded".to_owned())
+    }
 }
 
 fn apply_runtime_index_state(result: &mut CoreRecallResult, index_state: String) {
