@@ -4,8 +4,8 @@ use std::fmt;
 use crate::embedding::{EmbeddingError, EmbeddingProvider};
 use crate::index::{IndexEntry, IndexError, VectorIndex};
 use crate::storage::{
-    ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, SqliteRepository, StorageError,
-    TagWrite,
+    ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedFile,
+    PersistedReplacement, SqliteRepository, StorageError, TagWrite,
 };
 
 use super::chunker::{chunk_text, ChunkerConfig};
@@ -179,12 +179,13 @@ where
         }
 
         let file_hash = stable_content_hash(trimmed_content);
-        if let Some(existing) = self
+        let existing_files = self
             .repository
-            .find_file_by_hash(&request.namespace, &file_hash)?
-        {
-            let existing_chunks = self.repository.list_chunks_by_file_id(existing.id)?;
-            return self.handle_duplicate(existing, existing_chunks, file_hash, request.options.dedup_mode);
+            .list_active_files_by_hash(&request.namespace, &file_hash)?;
+        if let DedupMode::Reject = request.options.dedup_mode {
+            if let Some(existing) = existing_files.first() {
+                return self.reuse_duplicate(existing.clone(), file_hash);
+            }
         }
 
         let chunk_config = ChunkerConfig {
@@ -223,7 +224,46 @@ where
 
         let tags = normalize_tags(&request.namespace, &request.tags);
         let batch = build_write_batch(&request, &file_hash, &chunks, &tags, self.embedding_provider);
-        let persisted = self.repository.write_ingest_batch(&batch)?;
+        let mut warnings = build_ingest_warnings(&request.options);
+        if matches!(request.options.dedup_mode, DedupMode::Allow) && !existing_files.is_empty() {
+            warnings.push(format!(
+                "duplicate content was allowed; {} active file(s) already used this file_hash",
+                existing_files.len()
+            ));
+        }
+
+        let PersistedReplacement {
+            ingest: persisted,
+            deleted_chunk_ids,
+        } = if matches!(request.options.dedup_mode, DedupMode::Upsert) && !existing_files.is_empty() {
+            warnings.push(format!(
+                "upsert replaced {} active file(s) sharing the same file_hash",
+                existing_files.len()
+            ));
+            self.repository.replace_ingest_batch(
+                &request.namespace,
+                &existing_files.iter().map(|file| file.id).collect::<Vec<_>>(),
+                &batch,
+            )?
+        } else {
+            PersistedReplacement {
+                ingest: self.repository.write_ingest_batch(&batch)?,
+                deleted_chunk_ids: Vec::new(),
+            }
+        };
+
+        let cleanup_repair_task_id = if deleted_chunk_ids.is_empty() {
+            None
+        } else {
+            self.cleanup_replaced_index_entries(
+                &request.namespace,
+                &file_hash,
+                &existing_files,
+                &deleted_chunk_ids,
+                &mut warnings,
+            )?
+        };
+
         let chunk_ids = persisted
             .chunks
             .iter()
@@ -250,8 +290,8 @@ where
                     index_status: "ready".to_owned(),
                     file_hash,
                     duplicate: false,
-                    repair_task_id: None,
-                    warnings: build_ingest_warnings(&request.options),
+                    repair_task_id: cleanup_repair_task_id,
+                    warnings,
                 })
             }
             Err(index_error) => {
@@ -277,8 +317,12 @@ where
                     Some(&repair_payload),
                 )?;
 
-                let mut warnings = build_ingest_warnings(&request.options);
                 warnings.push(format!("index update failed and was queued for repair: {index_error}"));
+                if let Some(cleanup_repair_task_id) = cleanup_repair_task_id {
+                    warnings.push(format!(
+                        "previous version index cleanup is also queued for repair: repair_task_id={cleanup_repair_task_id}"
+                    ));
+                }
 
                 Ok(IngestResult {
                     file_id: persisted.file.id,
@@ -294,32 +338,62 @@ where
         }
     }
 
-    fn handle_duplicate(
+    fn reuse_duplicate(
         &self,
-        file: crate::storage::PersistedFile,
-        chunks: Vec<crate::storage::PersistedChunk>,
+        file: PersistedFile,
         file_hash: String,
-        mode: DedupMode,
     ) -> Result<IngestResult, IngestError> {
-        match mode {
-            DedupMode::Reject => Ok(IngestResult {
-                file_id: file.id,
-                chunk_ids: chunks.iter().map(|chunk| chunk.id).collect(),
-                ingest_status: file.ingest_status,
-                index_status: summarize_index_status(&chunks).to_owned(),
-                file_hash,
-                duplicate: true,
-                repair_task_id: None,
-                warnings: vec!["duplicate content rejected; reused existing file".to_owned()],
-            }),
-            DedupMode::Upsert => Err(IngestError::UnsupportedDedupMode {
-                mode,
-                reason: "upsert requires replace/soft-delete semantics that are not wired yet",
-            }),
-            DedupMode::Allow => Err(IngestError::UnsupportedDedupMode {
-                mode,
-                reason: "current schema enforces UNIQUE(namespace, file_hash) on files",
-            }),
+        let chunks = self.repository.list_chunks_by_file_id(file.id)?;
+        Ok(IngestResult {
+            file_id: file.id,
+            chunk_ids: chunks.iter().map(|chunk| chunk.id).collect(),
+            ingest_status: file.ingest_status,
+            index_status: summarize_index_status(&chunks).to_owned(),
+            file_hash,
+            duplicate: true,
+            repair_task_id: None,
+            warnings: vec!["duplicate content rejected; reused latest active file".to_owned()],
+        })
+    }
+
+    fn cleanup_replaced_index_entries(
+        &mut self,
+        namespace: &str,
+        file_hash: &str,
+        existing_files: &[PersistedFile],
+        deleted_chunk_ids: &[i64],
+        warnings: &mut Vec<String>,
+    ) -> Result<Option<i64>, IngestError> {
+        match self.vector_index.mark_deleted(namespace, deleted_chunk_ids) {
+            Ok(affected) => {
+                if affected < deleted_chunk_ids.len() {
+                    warnings.push(format!(
+                        "upsert removed {} chunk(s) from the index; {} chunk(s) were already absent",
+                        affected,
+                        deleted_chunk_ids.len() - affected
+                    ));
+                }
+                Ok(None)
+            }
+            Err(index_error) => {
+                let repair_payload = build_delete_repair_payload(
+                    file_hash,
+                    &existing_files.iter().map(|file| file.id).collect::<Vec<_>>(),
+                    deleted_chunk_ids,
+                    &index_error,
+                );
+                let repair_task_id = self.repository.enqueue_repair_task(
+                    namespace,
+                    "index_delete",
+                    "file",
+                    existing_files.first().map(|file| file.id),
+                    Some(&repair_payload),
+                )?;
+                warnings.push(format!(
+                    "previous version index cleanup failed and was queued for repair: {index_error}"
+                ));
+                Ok(Some(repair_task_id))
+            }
         }
     }
 }
@@ -446,6 +520,29 @@ fn build_repair_payload(
     )
 }
 
+fn build_delete_repair_payload(
+    file_hash: &str,
+    file_ids: &[i64],
+    chunk_ids: &[i64],
+    index_error: &IndexError,
+) -> String {
+    let file_ids_json = file_ids
+        .iter()
+        .map(|file_id| file_id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let chunk_ids_json = chunk_ids
+        .iter()
+        .map(|chunk_id| chunk_id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"file_hash\":\"{}\",\"file_ids\":[{file_ids_json}],\"chunk_ids\":[{chunk_ids_json}],\"error\":\"{}\"}}",
+        escape_json(file_hash),
+        escape_json(&index_error.to_string()),
+    )
+}
+
 fn count_tokens(text: &str) -> i64 {
     text.split_whitespace().count() as i64
 }
@@ -479,13 +576,11 @@ mod tests {
     use super::{DedupMode, IngestPipeline, IngestRequest};
     use crate::embedding::{EmbeddingProvider, StubEmbeddingProvider};
     use crate::index::{IndexEntry, IndexError, IndexResult, InMemoryVectorIndex, SearchRequest, VectorIndex};
-    use crate::storage::SqliteRepository;
-
-    const MIGRATION: &str = include_str!("../../../../migrations/0001_init.sql");
+    use crate::storage::{apply_sqlite_migrations, SqliteRepository};
 
     fn repository_with_schema() -> SqliteRepository {
         let connection = Connection::open_in_memory().expect("in-memory sqlite");
-        connection.execute_batch(MIGRATION).expect("apply migration");
+        apply_sqlite_migrations(&connection).expect("apply migration");
         SqliteRepository::new(connection).expect("repository")
     }
 
@@ -559,13 +654,13 @@ mod tests {
     }
 
     #[test]
-    fn reports_unsupported_dedup_modes_when_duplicate_exists() {
+    fn allows_duplicate_content_when_configured() {
         let mut repository = repository_with_schema();
         let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
         let mut index = InMemoryVectorIndex::new(4);
 
         let mut first_pipeline = IngestPipeline::new(&mut repository, &provider, &mut index);
-        first_pipeline
+        let first = first_pipeline
             .ingest(IngestRequest::new("duplicate body"))
             .expect("first ingest");
 
@@ -573,9 +668,62 @@ mod tests {
         request.options.dedup_mode = DedupMode::Allow;
 
         let mut second_pipeline = IngestPipeline::new(&mut repository, &provider, &mut index);
-        let error = second_pipeline.ingest(request).expect_err("allow should be rejected on duplicate");
+        let second = second_pipeline
+            .ingest(request)
+            .expect("allow should accept duplicate content");
 
-        assert!(error.to_string().contains("unsupported dedup mode allow"));
+        let active_files = repository
+            .list_active_files_by_hash("default", &first.file_hash)
+            .expect("list active files");
+
+        assert_eq!(active_files.len(), 2);
+        assert_ne!(first.file_id, second.file_id);
+        assert_eq!(first.file_hash, second.file_hash);
+        assert!(!second.duplicate);
+    }
+
+    #[test]
+    fn upsert_soft_deletes_previous_file_and_replaces_index_entries() {
+        let mut repository = repository_with_schema();
+        let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
+        let mut index = InMemoryVectorIndex::new(4);
+
+        let mut first_pipeline = IngestPipeline::new(&mut repository, &provider, &mut index);
+        let first = first_pipeline
+            .ingest(IngestRequest::new("duplicate body"))
+            .expect("first ingest");
+        let old_chunk_ids = first.chunk_ids.clone();
+
+        let mut request = IngestRequest::new("duplicate body");
+        request.filename = "replacement.txt".to_owned();
+        request.options.dedup_mode = DedupMode::Upsert;
+
+        let mut second_pipeline = IngestPipeline::new(&mut repository, &provider, &mut index);
+        let second = second_pipeline.ingest(request).expect("upsert should replace duplicate");
+
+        let active_files = repository
+            .list_active_files_by_hash("default", &first.file_hash)
+            .expect("list active files");
+        let previous_chunks = repository
+            .list_chunks_by_file_id(first.file_id)
+            .expect("load previous chunks");
+        let previous_chunk = repository
+            .get_chunk_record(old_chunk_ids[0])
+            .expect("get deleted chunk record");
+        let hits = index
+            .search(&SearchRequest::new(
+                "default",
+                provider.embed("duplicate body").expect("embedding"),
+                10,
+            ))
+            .expect("search");
+
+        assert_eq!(active_files.len(), 1);
+        assert_eq!(active_files[0].id, second.file_id);
+        assert_eq!(previous_chunks[0].index_status, "deleted");
+        assert!(previous_chunk.is_none());
+        assert_eq!(hits.len(), second.chunk_ids.len());
+        assert_eq!(hits[0].chunk_id, second.chunk_ids[0]);
     }
 
     #[derive(Debug)]

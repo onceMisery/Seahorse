@@ -15,8 +15,7 @@ CREATE TABLE IF NOT EXISTS files (
   metadata_json TEXT,
   ingest_status TEXT NOT NULL CHECK(ingest_status IN ('pending_index','ready','partial','deleted')) DEFAULT 'pending_index',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(namespace, file_hash)
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS chunks (
@@ -35,8 +34,7 @@ CREATE TABLE IF NOT EXISTS chunks (
   deleted_at DATETIME,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(file_id, chunk_index),
-  UNIQUE(namespace, content_hash)
+  UNIQUE(file_id, chunk_index)
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -101,7 +99,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_namespace_status ON maintenance_jobs(namespa
 CREATE INDEX IF NOT EXISTS idx_files_namespace_file ON files(namespace, file_hash);
 
 INSERT OR IGNORE INTO schema_meta(key, value) VALUES
-  ('schema_version', '1'),
+  ('schema_version', '2'),
   ('index_version', '1'),
   ('embedding_model_id', 'unknown'),
   ('embedding_dimension', '0');

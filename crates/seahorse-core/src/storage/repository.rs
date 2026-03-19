@@ -5,7 +5,8 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::models::{
     ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedChunk, PersistedFile,
-    PersistedIngest, RecallChunkRecord, TagWrite,
+    MaintenanceJob, PersistedDeletion, PersistedIngest, PersistedReplacement,
+    RecallChunkRecord, RebuildChunkRecord, TagWrite,
 };
 use super::schema::{validate_schema_meta, SchemaExpectation, SchemaMetaSnapshot};
 use super::{StorageError, StorageResult};
@@ -43,26 +44,40 @@ impl SqliteRepository {
         namespace: &str,
         file_hash: &str,
     ) -> StorageResult<Option<PersistedFile>> {
-        let file = self
-            .connection
-            .query_row(
-                "SELECT id, namespace, filename, file_hash, ingest_status
-                 FROM files
-                 WHERE namespace = ?1 AND file_hash = ?2",
-                params![namespace, file_hash],
-                |row| {
-                    Ok(PersistedFile {
-                        id: row.get(0)?,
-                        namespace: row.get(1)?,
-                        filename: row.get(2)?,
-                        file_hash: row.get(3)?,
-                        ingest_status: row.get(4)?,
-                    })
-                },
-            )
-            .optional()?;
+        Ok(self
+            .list_active_files_by_hash(namespace, file_hash)?
+            .into_iter()
+            .next())
+    }
 
-        Ok(file)
+    pub fn list_active_files_by_hash(
+        &self,
+        namespace: &str,
+        file_hash: &str,
+    ) -> StorageResult<Vec<PersistedFile>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, namespace, filename, file_hash, ingest_status
+             FROM files
+             WHERE namespace = ?1
+               AND file_hash = ?2
+               AND ingest_status != 'deleted'
+             ORDER BY id DESC",
+        )?;
+        let rows = statement.query_map(params![namespace, file_hash], |row| {
+            Ok(PersistedFile {
+                id: row.get(0)?,
+                namespace: row.get(1)?,
+                filename: row.get(2)?,
+                file_hash: row.get(3)?,
+                ingest_status: row.get(4)?,
+            })
+        })?;
+
+        let mut files = Vec::new();
+        for row in rows {
+            files.push(row?);
+        }
+        Ok(files)
     }
 
     pub fn list_chunks_by_file_id(&self, file_id: i64) -> StorageResult<Vec<PersistedChunk>> {
@@ -146,6 +161,24 @@ impl SqliteRepository {
         self.with_transaction(|transaction| write_ingest_batch(transaction, batch))
     }
 
+    pub fn replace_ingest_batch(
+        &mut self,
+        namespace: &str,
+        replaced_file_ids: &[i64],
+        batch: &IngestWriteBatch,
+    ) -> StorageResult<PersistedReplacement> {
+        self.with_transaction(|transaction| {
+            let deleted_chunk_ids =
+                soft_delete_files_in_transaction(transaction, namespace, replaced_file_ids)?;
+            let ingest = write_ingest_batch(transaction, batch)?;
+
+            Ok(PersistedReplacement {
+                ingest,
+                deleted_chunk_ids,
+            })
+        })
+    }
+
     pub fn update_indexing_result(
         &mut self,
         file_id: i64,
@@ -193,6 +226,296 @@ impl SqliteRepository {
         Ok(self.connection.last_insert_rowid())
     }
 
+    pub fn soft_delete_files(
+        &mut self,
+        namespace: &str,
+        file_ids: &[i64],
+    ) -> StorageResult<PersistedDeletion> {
+        self.with_transaction(|transaction| {
+            Ok(PersistedDeletion {
+                deleted_chunk_ids: soft_delete_files_in_transaction(transaction, namespace, file_ids)?,
+            })
+        })
+    }
+
+    pub fn soft_delete_chunks(
+        &mut self,
+        namespace: &str,
+        chunk_ids: &[i64],
+    ) -> StorageResult<PersistedDeletion> {
+        self.with_transaction(|transaction| {
+            Ok(PersistedDeletion {
+                deleted_chunk_ids: soft_delete_chunks_in_transaction(transaction, namespace, chunk_ids)?,
+            })
+        })
+    }
+
+    pub fn create_maintenance_job(
+        &mut self,
+        job_type: &str,
+        namespace: &str,
+        payload_json: Option<&str>,
+    ) -> StorageResult<MaintenanceJob> {
+        self.connection.execute(
+            "INSERT INTO maintenance_jobs (
+                job_type,
+                namespace,
+                payload_json,
+                status
+            ) VALUES (?1, ?2, ?3, 'queued')",
+            params![job_type, namespace, payload_json],
+        )?;
+
+        let job_id = self.connection.last_insert_rowid();
+        self.get_maintenance_job(job_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows.into())
+    }
+
+    pub fn find_active_maintenance_job(
+        &self,
+        job_type: &str,
+        namespace: &str,
+    ) -> StorageResult<Option<MaintenanceJob>> {
+        self.connection
+            .query_row(
+                "SELECT
+                    id,
+                    job_type,
+                    namespace,
+                    payload_json,
+                    status,
+                    progress,
+                    result_summary,
+                    error_message,
+                    created_at,
+                    started_at,
+                    finished_at
+                 FROM maintenance_jobs
+                 WHERE job_type = ?1
+                   AND namespace = ?2
+                   AND status IN ('queued', 'running')
+                 ORDER BY id DESC
+                 LIMIT 1",
+                params![job_type, namespace],
+                map_maintenance_job,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn cancel_active_maintenance_jobs(
+        &mut self,
+        job_type: &str,
+        namespace: &str,
+        reason: &str,
+    ) -> StorageResult<usize> {
+        let updated = self.connection.execute(
+            "UPDATE maintenance_jobs
+             SET status = 'cancelled',
+                 error_message = ?3,
+                 finished_at = CURRENT_TIMESTAMP
+             WHERE job_type = ?1
+               AND namespace = ?2
+               AND status IN ('queued', 'running')",
+            params![job_type, namespace, reason],
+        )?;
+
+        Ok(updated)
+    }
+
+    pub fn mark_maintenance_job_running(
+        &mut self,
+        job_id: i64,
+        progress: Option<&str>,
+    ) -> StorageResult<()> {
+        self.connection.execute(
+            "UPDATE maintenance_jobs
+             SET status = 'running',
+                 progress = ?2,
+                 started_at = COALESCE(started_at, CURRENT_TIMESTAMP)
+             WHERE id = ?1",
+            params![job_id, progress],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn finish_maintenance_job(
+        &mut self,
+        job_id: i64,
+        status: &str,
+        progress: Option<&str>,
+        result_summary: Option<&str>,
+        error_message: Option<&str>,
+    ) -> StorageResult<()> {
+        self.connection.execute(
+            "UPDATE maintenance_jobs
+             SET status = ?2,
+                 progress = ?3,
+                 result_summary = ?4,
+                 error_message = ?5,
+                 finished_at = CURRENT_TIMESTAMP
+             WHERE id = ?1",
+            params![job_id, status, progress, result_summary, error_message],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn get_maintenance_job(&self, job_id: i64) -> StorageResult<Option<MaintenanceJob>> {
+        self.connection
+            .query_row(
+                "SELECT
+                    id,
+                    job_type,
+                    namespace,
+                    payload_json,
+                    status,
+                    progress,
+                    result_summary,
+                    error_message,
+                    created_at,
+                    started_at,
+                    finished_at
+                 FROM maintenance_jobs
+                 WHERE id = ?1",
+                [job_id],
+                map_maintenance_job,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_rebuild_chunks(&self, namespace: &str) -> StorageResult<Vec<RebuildChunkRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                c.id,
+                c.file_id,
+                c.namespace,
+                c.chunk_text,
+                c.index_status
+             FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             WHERE c.namespace = ?1
+               AND f.namespace = ?1
+               AND c.is_deleted = 0
+               AND c.index_status != 'deleted'
+               AND f.ingest_status != 'deleted'
+             ORDER BY c.id ASC",
+        )?;
+        let rows = statement.query_map([namespace], |row| {
+            Ok(RebuildChunkRecord {
+                chunk_id: row.get(0)?,
+                file_id: row.get(1)?,
+                namespace: row.get(2)?,
+                chunk_text: row.get(3)?,
+                index_status: row.get(4)?,
+            })
+        })?;
+
+        let mut chunks = Vec::new();
+        for row in rows {
+            chunks.push(row?);
+        }
+        Ok(chunks)
+    }
+
+    pub fn list_missing_index_chunks(
+        &self,
+        namespace: &str,
+    ) -> StorageResult<Vec<RebuildChunkRecord>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                c.id,
+                c.file_id,
+                c.namespace,
+                c.chunk_text,
+                c.index_status
+             FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             WHERE c.namespace = ?1
+               AND f.namespace = ?1
+               AND c.is_deleted = 0
+               AND c.index_status IN ('pending', 'failed')
+               AND f.ingest_status != 'deleted'
+             ORDER BY c.id ASC",
+        )?;
+        let rows = statement.query_map([namespace], |row| {
+            Ok(RebuildChunkRecord {
+                chunk_id: row.get(0)?,
+                file_id: row.get(1)?,
+                namespace: row.get(2)?,
+                chunk_text: row.get(3)?,
+                index_status: row.get(4)?,
+            })
+        })?;
+
+        let mut chunks = Vec::new();
+        for row in rows {
+            chunks.push(row?);
+        }
+        Ok(chunks)
+    }
+
+    pub fn mark_chunks_ready(&mut self, namespace: &str, chunk_ids: &[i64]) -> StorageResult<()> {
+        for chunk_id in chunk_ids {
+            self.connection.execute(
+                "UPDATE chunks
+                 SET index_status = 'ready'
+                 WHERE namespace = ?1
+                   AND id = ?2
+                   AND is_deleted = 0
+                   AND index_status != 'deleted'",
+                params![namespace, chunk_id],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn refresh_file_statuses(&mut self, namespace: &str) -> StorageResult<()> {
+        self.connection.execute(
+            "UPDATE files
+             SET ingest_status = CASE
+                 WHEN EXISTS (
+                     SELECT 1
+                     FROM chunks c
+                     WHERE c.file_id = files.id
+                       AND c.is_deleted = 0
+                       AND c.index_status != 'ready'
+                 ) THEN 'partial'
+                 ELSE 'ready'
+             END
+             WHERE namespace = ?1
+               AND ingest_status != 'deleted'",
+            [namespace],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn set_schema_meta_value(&mut self, key: &str, value: &str) -> StorageResult<()> {
+        self.connection.execute(
+            "INSERT INTO schema_meta(key, value)
+             VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn get_schema_meta_value(&self, key: &str) -> StorageResult<Option<String>> {
+        self.connection
+            .query_row(
+                "SELECT value FROM schema_meta WHERE key = ?1",
+                [key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     fn list_tags_by_chunk_id(&self, chunk_id: i64) -> StorageResult<Vec<String>> {
         let mut statement = self.connection.prepare(
             "SELECT t.normalized_name
@@ -209,6 +532,22 @@ impl SqliteRepository {
         }
         Ok(tags)
     }
+}
+
+fn map_maintenance_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaintenanceJob> {
+    Ok(MaintenanceJob {
+        id: row.get(0)?,
+        job_type: row.get(1)?,
+        namespace: row.get(2)?,
+        payload_json: row.get(3)?,
+        status: row.get(4)?,
+        progress: row.get(5)?,
+        result_summary: row.get(6)?,
+        error_message: row.get(7)?,
+        created_at: row.get(8)?,
+        started_at: row.get(9)?,
+        finished_at: row.get(10)?,
+    })
 }
 
 fn enable_foreign_keys(connection: &Connection) -> StorageResult<()> {
@@ -260,6 +599,135 @@ fn write_ingest_batch(
         chunks,
         tag_ids,
     })
+}
+
+fn soft_delete_files_in_transaction(
+    transaction: &Transaction<'_>,
+    namespace: &str,
+    file_ids: &[i64],
+) -> StorageResult<Vec<i64>> {
+    if file_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut deleted_chunk_ids = Vec::new();
+    let unique_file_ids = file_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut select_chunks = transaction.prepare(
+        "SELECT c.id
+         FROM chunks c
+         JOIN files f ON f.id = c.file_id
+         WHERE f.namespace = ?1
+           AND f.id = ?2
+           AND f.ingest_status != 'deleted'
+           AND c.is_deleted = 0
+         ORDER BY c.chunk_index ASC",
+    )?;
+
+    for file_id in &unique_file_ids {
+        let rows = select_chunks.query_map(params![namespace, file_id], |row| row.get::<_, i64>(0))?;
+        for row in rows {
+            deleted_chunk_ids.push(row?);
+        }
+    }
+
+    for chunk_id in &deleted_chunk_ids {
+        transaction.execute(
+            "UPDATE chunks
+             SET is_deleted = 1,
+                 deleted_at = CURRENT_TIMESTAMP,
+                 index_status = 'deleted'
+             WHERE id = ?1",
+            [chunk_id],
+        )?;
+    }
+
+    for file_id in &unique_file_ids {
+        transaction.execute(
+            "UPDATE files
+             SET ingest_status = 'deleted'
+             WHERE namespace = ?1 AND id = ?2",
+            params![namespace, file_id],
+        )?;
+    }
+
+    Ok(deleted_chunk_ids)
+}
+
+fn soft_delete_chunks_in_transaction(
+    transaction: &Transaction<'_>,
+    namespace: &str,
+    chunk_ids: &[i64],
+) -> StorageResult<Vec<i64>> {
+    if chunk_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut affected_chunk_ids = Vec::new();
+    let mut touched_file_ids = BTreeMap::<i64, ()>::new();
+    let unique_chunk_ids = chunk_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut select_chunk = transaction.prepare(
+        "SELECT c.id, c.file_id
+         FROM chunks c
+         JOIN files f ON f.id = c.file_id
+         WHERE c.id = ?1
+           AND c.namespace = ?2
+           AND f.namespace = ?2
+           AND f.ingest_status != 'deleted'
+           AND c.is_deleted = 0",
+    )?;
+
+    for chunk_id in &unique_chunk_ids {
+        let record = select_chunk
+            .query_row(params![chunk_id, namespace], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .optional()?;
+
+        if let Some((chunk_id, file_id)) = record {
+            affected_chunk_ids.push(chunk_id);
+            touched_file_ids.insert(file_id, ());
+        }
+    }
+
+    for chunk_id in &affected_chunk_ids {
+        transaction.execute(
+            "UPDATE chunks
+             SET is_deleted = 1,
+                 deleted_at = CURRENT_TIMESTAMP,
+                 index_status = 'deleted'
+             WHERE id = ?1",
+            [chunk_id],
+        )?;
+    }
+
+    for file_id in touched_file_ids.keys() {
+        let remaining_active_chunks: i64 = transaction.query_row(
+            "SELECT COUNT(*)
+             FROM chunks
+             WHERE file_id = ?1
+               AND is_deleted = 0
+               AND index_status != 'deleted'",
+            [file_id],
+            |row| row.get(0),
+        )?;
+
+        if remaining_active_chunks == 0 {
+            transaction.execute(
+                "UPDATE files
+                 SET ingest_status = 'deleted'
+                 WHERE namespace = ?1 AND id = ?2",
+                params![namespace, file_id],
+            )?;
+        }
+    }
+
+    Ok(affected_chunk_ids)
 }
 
 fn insert_file(transaction: &Transaction<'_>, file: &FileWrite) -> StorageResult<PersistedFile> {
@@ -389,13 +857,13 @@ mod tests {
 
     use super::SqliteRepository;
     use crate::storage::models::{ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, TagWrite};
-    use crate::storage::{SchemaExpectation, StorageError};
-
-    const MIGRATION: &str = include_str!("../../../../migrations/0001_init.sql");
+    use crate::storage::{
+        apply_sqlite_migrations, SchemaExpectation, StorageError, LATEST_SCHEMA_VERSION,
+    };
 
     fn repository_with_schema() -> SqliteRepository {
         let connection = Connection::open_in_memory().expect("in-memory sqlite");
-        connection.execute_batch(MIGRATION).expect("apply migration");
+        apply_sqlite_migrations(&connection).expect("apply migration");
         SqliteRepository::new(connection).expect("repository")
     }
 
@@ -403,10 +871,10 @@ mod tests {
     fn validates_schema_through_repository() {
         let repository = repository_with_schema();
         let snapshot = repository
-            .validate_schema(&SchemaExpectation::new("1", "1", "unknown", 0))
+            .validate_schema(&SchemaExpectation::new(LATEST_SCHEMA_VERSION, "1", "unknown", 0))
             .expect("schema valid");
 
-        assert_eq!(snapshot.schema_version, "1");
+        assert_eq!(snapshot.schema_version, LATEST_SCHEMA_VERSION);
     }
 
     #[test]
@@ -591,5 +1059,152 @@ mod tests {
         assert_eq!(record.chunk_id, persisted.chunks[0].id);
         assert_eq!(record.source_file, "doc.txt");
         assert_eq!(record.tags, vec!["project".to_owned(), "rust".to_owned()]);
+    }
+
+    #[test]
+    fn soft_delete_hides_files_from_active_hash_lookup() {
+        let mut repository = repository_with_schema();
+        let batch = IngestWriteBatch {
+            file: FileWrite::new("doc.txt", "hash-soft-delete"),
+            chunks: vec![ChunkWrite::new(0, "alpha", "chunk-soft-delete", "test-model", 3)],
+            tags: vec![],
+            chunk_tags: vec![],
+        };
+
+        let persisted = repository
+            .write_ingest_batch(&batch)
+            .expect("write ingest batch");
+
+        let deleted = repository
+            .soft_delete_files("default", &[persisted.file.id])
+            .expect("soft delete file");
+        let active_files = repository
+            .list_active_files_by_hash("default", "hash-soft-delete")
+            .expect("list active files");
+        let chunk = repository
+            .get_chunk_record(persisted.chunks[0].id)
+            .expect("load chunk record after delete");
+
+        assert_eq!(deleted.deleted_chunk_ids, vec![persisted.chunks[0].id]);
+        assert!(active_files.is_empty());
+        assert!(chunk.is_none());
+    }
+
+    #[test]
+    fn soft_delete_chunks_keeps_file_until_last_chunk_is_deleted() {
+        let mut repository = repository_with_schema();
+        let batch = IngestWriteBatch {
+            file: FileWrite::new("doc.txt", "hash-partial-delete"),
+            chunks: vec![
+                ChunkWrite::new(0, "alpha", "chunk-delete-1", "test-model", 3),
+                ChunkWrite::new(1, "beta", "chunk-delete-2", "test-model", 3),
+            ],
+            tags: vec![],
+            chunk_tags: vec![],
+        };
+
+        let persisted = repository
+            .write_ingest_batch(&batch)
+            .expect("write ingest batch");
+
+        let partial = repository
+            .soft_delete_chunks("default", &[persisted.chunks[0].id])
+            .expect("soft delete one chunk");
+        let file_after_partial = repository
+            .find_file_by_hash("default", "hash-partial-delete")
+            .expect("find file after partial")
+            .expect("file should remain active");
+        let final_delete = repository
+            .soft_delete_chunks("default", &[persisted.chunks[1].id])
+            .expect("soft delete final chunk");
+        let file_after_final = repository
+            .find_file_by_hash("default", "hash-partial-delete")
+            .expect("find file after final delete");
+
+        assert_eq!(partial.deleted_chunk_ids, vec![persisted.chunks[0].id]);
+        assert_eq!(file_after_partial.id, persisted.file.id);
+        assert_eq!(final_delete.deleted_chunk_ids, vec![persisted.chunks[1].id]);
+        assert!(file_after_final.is_none());
+    }
+
+    #[test]
+    fn persists_and_transitions_maintenance_jobs() {
+        let mut repository = repository_with_schema();
+
+        let job = repository
+            .create_maintenance_job("rebuild", "default", Some("{\"scope\":\"all\"}"))
+            .expect("create maintenance job");
+        assert_eq!(job.status, "queued");
+
+        let active = repository
+            .find_active_maintenance_job("rebuild", "default")
+            .expect("find active maintenance job")
+            .expect("active job exists");
+        assert_eq!(active.id, job.id);
+
+        repository
+            .mark_maintenance_job_running(job.id, Some("running"))
+            .expect("mark running");
+        repository
+            .finish_maintenance_job(job.id, "succeeded", Some("1/1"), Some("done"), None)
+            .expect("finish job");
+
+        let persisted = repository
+            .get_maintenance_job(job.id)
+            .expect("load maintenance job")
+            .expect("job should exist");
+        assert_eq!(persisted.status, "succeeded");
+        assert_eq!(persisted.progress.as_deref(), Some("1/1"));
+        assert_eq!(persisted.result_summary.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn lists_rebuild_targets_and_refreshes_file_status() {
+        let mut repository = repository_with_schema();
+        let batch = IngestWriteBatch {
+            file: FileWrite::new("rebuild.txt", "hash-rebuild"),
+            chunks: vec![ChunkWrite::new(0, "alpha", "chunk-rebuild", "test-model", 3)],
+            tags: vec![],
+            chunk_tags: vec![],
+        };
+
+        let persisted = repository
+            .write_ingest_batch(&batch)
+            .expect("write ingest batch");
+        repository
+            .update_indexing_result(persisted.file.id, &[persisted.chunks[0].id], "partial", "failed")
+            .expect("mark chunk failed");
+
+        let all_chunks = repository
+            .list_rebuild_chunks("default")
+            .expect("list rebuild chunks");
+        let missing_chunks = repository
+            .list_missing_index_chunks("default")
+            .expect("list missing index chunks");
+
+        assert_eq!(all_chunks.len(), 1);
+        assert_eq!(missing_chunks.len(), 1);
+        assert_eq!(missing_chunks[0].chunk_id, persisted.chunks[0].id);
+
+        repository
+            .mark_chunks_ready("default", &[persisted.chunks[0].id])
+            .expect("mark chunk ready");
+        repository
+            .refresh_file_statuses("default")
+            .expect("refresh file statuses");
+        repository
+            .set_schema_meta_value("index_state", "ready")
+            .expect("set index_state");
+
+        let file = repository
+            .find_file_by_hash("default", "hash-rebuild")
+            .expect("find file")
+            .expect("file exists");
+        let index_state = repository
+            .get_schema_meta_value("index_state")
+            .expect("get index_state");
+
+        assert_eq!(file.ingest_status, "ready");
+        assert_eq!(index_state.as_deref(), Some("ready"));
     }
 }

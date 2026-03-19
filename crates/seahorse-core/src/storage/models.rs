@@ -132,6 +132,17 @@ pub struct PersistedIngest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedReplacement {
+    pub ingest: PersistedIngest,
+    pub deleted_chunk_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistedDeletion {
+    pub deleted_chunk_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecallChunkRecord {
     pub chunk_id: i64,
     pub file_id: i64,
@@ -141,4 +152,28 @@ pub struct RecallChunkRecord {
     pub source_type: Option<String>,
     pub metadata_json: Option<String>,
     pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebuildChunkRecord {
+    pub chunk_id: i64,
+    pub file_id: i64,
+    pub namespace: String,
+    pub chunk_text: String,
+    pub index_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceJob {
+    pub id: i64,
+    pub job_type: String,
+    pub namespace: String,
+    pub payload_json: Option<String>,
+    pub status: String,
+    pub progress: Option<String>,
+    pub result_summary: Option<String>,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
 }

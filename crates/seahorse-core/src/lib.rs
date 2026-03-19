@@ -14,12 +14,18 @@ pub use pipeline::chunker::{chunk_text, Chunk, ChunkerConfig};
 pub use pipeline::hashing::{fnv1a_hash, stable_content_hash};
 pub use pipeline::{
     DedupMode, IngestError, IngestOptions, IngestPipeline, IngestRequest, IngestResult,
-    RecallError, RecallFilters, RecallPipeline, RecallRequest, RecallResponseMetadata,
-    RecallResult, RecallResultItem,
+    ForgetError, ForgetMode, ForgetPipeline, ForgetRequest, ForgetResult, RecallError,
+    RecallFilters, RecallPipeline, RecallRequest, RecallResponseMetadata, RecallResult,
+    RecallResultItem, RebuildError, RebuildPipeline, RebuildRequest, RebuildResult,
+    RebuildScope,
 };
 pub use pipeline::preprocessor::normalize_text;
 pub use storage::{
+    apply_sqlite_migrations,
     ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedChunk, PersistedFile,
-    PersistedIngest, RecallChunkRecord, SchemaExpectation, SchemaMetaSnapshot, SqliteRepository,
-    StorageError, StorageResult, TagWrite, read_schema_meta, validate_schema_meta,
+    MaintenanceJob, PersistedDeletion, PersistedIngest, PersistedReplacement,
+    RecallChunkRecord, RebuildChunkRecord, SchemaExpectation, SchemaMetaSnapshot,
+    SqliteRepository, StorageError, StorageResult, TagWrite, LATEST_SCHEMA_VERSION,
+    read_schema_meta,
+    validate_schema_meta,
 };

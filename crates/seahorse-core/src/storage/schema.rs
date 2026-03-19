@@ -127,13 +127,11 @@ mod tests {
     use rusqlite::Connection;
 
     use super::{read_schema_meta, validate_schema_meta, SchemaExpectation};
-    use crate::storage::StorageError;
-
-    const MIGRATION: &str = include_str!("../../../../migrations/0001_init.sql");
+    use crate::storage::{apply_sqlite_migrations, StorageError, LATEST_SCHEMA_VERSION};
 
     fn migrated_connection() -> Connection {
         let connection = Connection::open_in_memory().expect("in-memory sqlite");
-        connection.execute_batch(MIGRATION).expect("apply migration");
+        apply_sqlite_migrations(&connection).expect("apply migration");
         connection
     }
 
@@ -142,7 +140,7 @@ mod tests {
         let connection = migrated_connection();
         let snapshot = read_schema_meta(&connection).expect("read schema_meta");
 
-        assert_eq!(snapshot.schema_version, "1");
+        assert_eq!(snapshot.schema_version, LATEST_SCHEMA_VERSION);
         assert_eq!(snapshot.index_version, "1");
         assert_eq!(snapshot.embedding_model_id, "unknown");
         assert_eq!(snapshot.embedding_dimension, 0);
@@ -152,7 +150,7 @@ mod tests {
     #[test]
     fn validates_schema_meta_against_expected_values() {
         let connection = migrated_connection();
-        let expected = SchemaExpectation::new("1", "1", "unknown", 0);
+        let expected = SchemaExpectation::new(LATEST_SCHEMA_VERSION, "1", "unknown", 0);
 
         let snapshot = validate_schema_meta(&connection, &expected).expect("schema valid");
         assert_eq!(snapshot.embedding_dimension, 0);
@@ -169,7 +167,10 @@ mod tests {
             .expect("update schema version");
 
         let error =
-            validate_schema_meta(&connection, &SchemaExpectation::new("1", "1", "unknown", 0))
+            validate_schema_meta(
+                &connection,
+                &SchemaExpectation::new(LATEST_SCHEMA_VERSION, "1", "unknown", 0),
+            )
                 .expect_err("schema should mismatch");
 
         match error {

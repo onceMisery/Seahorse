@@ -72,6 +72,28 @@ pub struct RecallRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ForgetRequest {
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+    #[serde(default)]
+    pub chunk_ids: Vec<i64>,
+    #[serde(default)]
+    pub file_id: Option<i64>,
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminRebuildRequest {
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct RecallFilters {
     #[serde(default)]
     pub file_id: Option<i64>,
@@ -93,6 +115,34 @@ pub struct IngestResponseData {
 pub struct RecallResponseData {
     pub results: Vec<RecallResultItem>,
     pub metadata: RecallResponseMetadata,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ForgetResponseData {
+    pub affected_chunks: usize,
+    pub index_cleanup_status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminRebuildResponseData {
+    pub job_id: String,
+    pub status: String,
+    pub submitted_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminJobResponseData {
+    pub job_id: String,
+    pub job_type: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

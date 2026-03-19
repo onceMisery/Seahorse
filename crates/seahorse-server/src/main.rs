@@ -12,6 +12,9 @@ async fn main() {
     let app = Router::new()
         .route("/ingest", post(handlers::ingest::post_ingest))
         .route("/recall", post(handlers::recall::post_recall))
+        .route("/forget", post(handlers::forget::post_forget))
+        .route("/admin/rebuild", post(handlers::rebuild::post_rebuild))
+        .route("/admin/jobs/{job_id}", get(handlers::jobs::get_job))
         .route("/health", get(handlers::health::get_health))
         .with_state(state);
 

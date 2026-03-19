@@ -267,13 +267,11 @@ mod tests {
     use crate::embedding::StubEmbeddingProvider;
     use crate::index::{IndexEntry, IndexResult, SearchHit, SearchRequest, VectorIndex};
     use crate::pipeline::{IngestPipeline, IngestRequest};
-    use crate::storage::SqliteRepository;
-
-    const MIGRATION: &str = include_str!("../../../../migrations/0001_init.sql");
+    use crate::storage::{apply_sqlite_migrations, SqliteRepository};
 
     fn repository_with_schema() -> SqliteRepository {
         let connection = Connection::open_in_memory().expect("in-memory sqlite");
-        connection.execute_batch(MIGRATION).expect("apply migration");
+        apply_sqlite_migrations(&connection).expect("apply migration");
         SqliteRepository::new(connection).expect("repository")
     }
 
