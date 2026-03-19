@@ -1,0 +1,8 @@
+[workspace]
+members = [
+    "crates/seahorse-core",
+    "crates/seahorse-server",
+    "crates/seahorse-cli",
+]
+resolver = "2"
+
