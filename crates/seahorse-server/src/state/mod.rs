@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use rusqlite::{params, Connection};
+use serde::Deserialize;
 use serde_json::json;
 use seahorse_core::{
     EmbeddingProvider, InMemoryVectorIndex, IndexEntry, IngestError, IngestPipeline,
@@ -44,6 +45,12 @@ struct PreparedRebuildWork {
     scope: RebuildScope,
     provider: StubEmbeddingProvider,
     chunks: Vec<RebuildChunkRecord>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RebuildJobPayload {
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,8 +96,16 @@ impl AppState {
         vector_index
             .insert(&bootstrap_entries)
             .map_err(|error| format!("failed to warm in-memory index from sqlite: {error}"))?;
-        let initial_index_state = derive_index_state(&repository)
-            .map_err(|error| format!("failed to derive initial index state: {error}"))?;
+        let has_active_rebuild = repository
+            .find_active_maintenance_job("rebuild", "default")
+            .map_err(|error| format!("failed to inspect active rebuild job: {error}"))?
+            .is_some();
+        let initial_index_state = if has_active_rebuild {
+            "rebuilding".to_owned()
+        } else {
+            derive_index_state(&repository)
+                .map_err(|error| format!("failed to derive initial index state: {error}"))?
+        };
         sync_runtime_schema_meta(&mut repository, &embedding_provider, &initial_index_state)?;
         let db_label = if db_path == ":memory:" {
             "sqlite-memory".to_owned()
@@ -98,14 +113,17 @@ impl AppState {
             "sqlite".to_owned()
         };
 
-        Ok(Self {
+        let state = Self {
             services: Arc::new(Mutex::new(AppServices {
                 repository,
                 embedding_provider,
                 vector_index,
                 db_label,
             })),
-        })
+        };
+        state.recover_active_rebuild_job()?;
+
+        Ok(state)
     }
 
     pub fn ingest(&self, request: CoreIngestRequest) -> Result<CoreIngestResult, AppStateError> {
@@ -254,6 +272,38 @@ impl AppState {
 }
 
 impl AppState {
+    fn recover_active_rebuild_job(&self) -> Result<(), String> {
+        let active_job = {
+            let services = self
+                .services
+                .lock()
+                .map_err(|_| "application state lock poisoned during startup recovery".to_owned())?;
+            services
+                .repository
+                .find_active_maintenance_job("rebuild", "default")
+                .map_err(|error| format!("failed to query active rebuild job during startup recovery: {error}"))?
+        };
+
+        let Some(job) = active_job else {
+            return Ok(());
+        };
+
+        let request = match rebuild_request_from_job(&job) {
+            Ok(request) => request,
+            Err(message) => {
+                let _ = self.fail_rebuild_submission(job.id, &job.namespace, &message);
+                return Ok(());
+            }
+        };
+
+        if let Err(error) = self.spawn_rebuild_worker(job.id, request) {
+            let error_message = format!("failed to resume rebuild worker: {error}");
+            let _ = self.fail_rebuild_submission(job.id, &job.namespace, &error_message);
+        }
+
+        Ok(())
+    }
+
     fn spawn_rebuild_worker(
         &self,
         job_id: i64,
@@ -631,4 +681,28 @@ fn load_job(repository: &SqliteRepository, job_id: i64) -> Result<MaintenanceJob
         .ok_or(AppStateError::NotFound {
             message: format!("job_id {job_id} not found"),
         })
+}
+
+fn rebuild_request_from_job(job: &MaintenanceJob) -> Result<CoreRebuildRequest, String> {
+    let payload = match job.payload_json.as_deref() {
+        Some(payload_json) => serde_json::from_str::<RebuildJobPayload>(payload_json)
+            .map_err(|error| format!("invalid rebuild job payload for job_id {}: {error}", job.id))?,
+        None => RebuildJobPayload { scope: None },
+    };
+
+    let scope = match payload.scope.as_deref().unwrap_or("all") {
+        "all" => RebuildScope::All,
+        "missing_index" => RebuildScope::MissingIndex,
+        other => {
+            return Err(format!(
+                "invalid rebuild job scope for job_id {}: {other}",
+                job.id
+            ))
+        }
+    };
+
+    Ok(CoreRebuildRequest {
+        namespace: job.namespace.clone(),
+        scope,
+    })
 }
