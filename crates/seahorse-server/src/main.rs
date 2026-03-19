@@ -239,6 +239,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn startup_marks_invalid_rebuild_payload_job_failed() {
+        let (state, db_path) = test_state("rebuild-invalid-payload");
+        seed_rebuild_dataset(&state, "invalid-payload");
+        drop(state);
+
+        let job_id = enqueue_raw_rebuild_job(
+            &db_path,
+            json!({
+                "scope": "not-supported",
+                "force": false
+            })
+            .to_string(),
+            false,
+        );
+        let recovered_state = AppState::new_with_db_path(
+            db_path
+                .to_str()
+                .expect("temp db path must be valid unicode"),
+        )
+        .expect("restart app state");
+        let app = build_app(recovered_state);
+
+        let final_body = poll_job_until_terminal(app, &format!("job-{job_id}")).await;
+
+        assert_eq!(final_body["success"], Value::Bool(true));
+        assert_eq!(
+            final_body["data"]["status"],
+            Value::String("failed".to_owned())
+        );
+        assert!(
+            final_body["data"]["error_message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("invalid rebuild job scope")
+        );
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[tokio::test]
     async fn jobs_endpoint_returns_not_found_for_unknown_job_id() {
         let (state, db_path) = test_state("job-not-found");
         let app = build_app(state);
@@ -344,13 +384,20 @@ mod tests {
     }
 
     fn enqueue_rebuild_job(db_path: &PathBuf, scope: &str, mark_running: bool) -> i64 {
+        enqueue_raw_rebuild_job(
+            db_path,
+            json!({
+                "scope": scope,
+                "force": false
+            })
+            .to_string(),
+            mark_running,
+        )
+    }
+
+    fn enqueue_raw_rebuild_job(db_path: &PathBuf, payload_json: String, mark_running: bool) -> i64 {
         let connection = Connection::open(db_path).expect("open sqlite db for recovery job");
         let mut repository = SqliteRepository::new(connection).expect("create repository");
-        let payload_json = json!({
-            "scope": scope,
-            "force": false
-        })
-        .to_string();
         let job = repository
             .create_maintenance_job("rebuild", "default", Some(&payload_json))
             .expect("enqueue rebuild job");
