@@ -1,0 +1,375 @@
+openapi: 3.1.0
+info:
+  title: Seahorse MVP Memory Engine
+  version: 0.1.0
+  description: |
+    MVP 接口契约，依据 `docs/mvp-design-and-roadmap.md` 与 `docs/mvp-issue-breakdown.md`。
+servers:
+  - url: http://localhost:8080
+components:
+  schemas:
+    BaseRequest:
+      type: object
+      properties:
+        namespace:
+          type: string
+          enum: [default]
+          default: default
+          description: MVP 阶段仅支持 `default`
+        content:
+          type: string
+          minLength: 1
+        source:
+          type: object
+          properties:
+            type:
+              type: string
+            filename:
+              type: string
+              maxLength: 255
+        tags:
+          type: array
+          items:
+            type: string
+            maxLength: 64
+          maxItems: 32
+        metadata:
+          type: object
+          description: 平铺 JSON 对象，序列化后建议不超过 16KB
+        options:
+          type: object
+          properties:
+            chunk_mode:
+              type: string
+            auto_tag:
+              type: boolean
+            dedup_mode:
+              type: string
+              enum: [reject, upsert, allow]
+        query:
+          type: string
+        filters:
+          type: object
+          properties:
+            file_id:
+              type: integer
+            tags:
+              type: array
+              items:
+                type: string
+        mode:
+          type: string
+          enum: [basic]
+        top_k:
+          type: integer
+          maximum: 20
+          default: 10
+        timeout_ms:
+          type: integer
+        chunk_ids:
+          type: array
+          items:
+            type: integer
+        file_id:
+          type: integer
+        scope:
+          type: string
+          enum: [all, missing_index]
+        force:
+          type: boolean
+    ResponseEnvelope:
+      type: object
+      required: [success, data, error, request_id]
+      properties:
+        success:
+          type: boolean
+        data:
+          oneOf:
+            - type: object
+            - type: 'null'
+        error:
+          oneOf:
+            - $ref: '#/components/schemas/ErrorObject'
+            - type: 'null'
+        request_id:
+          type: string
+    ErrorObject:
+      type: object
+      required: [code, message, retryable]
+      properties:
+        code:
+          type: string
+          enum: [INVALID_INPUT, EMBEDDING_FAILED, STORAGE_ERROR, INDEX_UNAVAILABLE, REBUILD_FAILED, TIMEOUT, PARTIAL_RESULT]
+        message:
+          type: string
+        retryable:
+          type: boolean
+    RecallResultItem:
+      type: object
+      properties:
+        chunk_id:
+          type: integer
+        chunk_text:
+          type: string
+        source_file:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        score:
+          type: number
+          format: float
+        source_type:
+          type: string
+          enum: [Vector]
+        metadata:
+          type: object
+    AdminJob:
+      type: object
+      required: [job_id, job_type, status]
+      properties:
+        job_id:
+          type: string
+        job_type:
+          type: string
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, cancelled]
+        progress:
+          type: string
+        error_message:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+paths:
+  /ingest:
+    post:
+      summary: 写入 chunk 并更新向量索引
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/BaseRequest'
+                - type: object
+                  required: [content]
+      responses:
+        '200':
+          description: 成功写入
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResponseEnvelope'
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          file_id:
+                            type: integer
+                          chunk_ids:
+                            type: array
+                            items:
+                              type: integer
+                          ingest_status:
+                            type: string
+                            enum: [pending_index, ready, partial, deleted]
+                          index_status:
+                            type: string
+                            enum: [ready, pending_repair]
+                          warnings:
+                            type: array
+                            items:
+                              type: string
+                      error:
+                        nullable: true
+  /recall:
+    post:
+      summary: 向量召回，附带 metadata 与 tag
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/BaseRequest'
+                - type: object
+                  required: [query]
+      responses:
+        '200':
+          description: 召回结果
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResponseEnvelope'
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          results:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/RecallResultItem'
+                          metadata:
+                            type: object
+                            properties:
+                              top_k:
+                                type: integer
+                              latency_ms:
+                                type: integer
+                              degraded:
+                                type: boolean
+                              degraded_reason:
+                                type: string
+                              result_count:
+                                type: integer
+                              index_state:
+                                type: string
+                                enum: [ready, rebuilding, degraded, unavailable]
+  /forget:
+    post:
+      summary: 标记 chunk 删除
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/BaseRequest'
+                - type: object
+                  anyOf:
+                    - required: [chunk_ids]
+                    - required: [file_id]
+                  properties:
+                    mode:
+                      type: string
+                      enum: [soft, hard]
+                      default: soft
+      responses:
+        '200':
+          description: 删除响应
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResponseEnvelope'
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          affected_chunks:
+                            type: integer
+                            description: 被软删除的 chunk 数量
+                          index_cleanup_status:
+                            type: string
+                            enum: [pending, running, completed]
+  /admin/rebuild:
+    post:
+      summary: 提交 rebuild 作业
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/BaseRequest'
+                - type: object
+      responses:
+        '200':
+          description: 作业已接受
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResponseEnvelope'
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          job_id:
+                            type: string
+                          status:
+                            type: string
+                            enum: [queued, running, succeeded, failed, cancelled]
+                          submitted_at:
+                            type: string
+                            format: date-time
+  /admin/jobs/{job_id}:
+    get:
+      summary: 查询 rebuild 作业状态
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: 作业状态
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResponseEnvelope'
+                  - properties:
+                      data:
+                        $ref: '#/components/schemas/AdminJob'
+  /stats:
+    get:
+      summary: 返回基础指标
+      responses:
+        '200':
+          description: metrics
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResponseEnvelope'
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          chunk_count:
+                            type: integer
+                          tag_count:
+                            type: integer
+                          deleted_chunk_count:
+                            type: integer
+                          repair_queue_size:
+                            type: integer
+                          index_status:
+                            type: string
+                            enum: [ready, rebuilding, degraded, unavailable]
+  /health:
+    get:
+      summary: 健康检查
+      responses:
+        '200':
+          description: health
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResponseEnvelope'
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: [ok, degraded, failed]
+                          db:
+                            type: string
+                          index:
+                            type: string
+                          embedding_provider:
+                            type: string
+                          version:
+                            type: string
