@@ -6,7 +6,7 @@ pub mod schema;
 pub use error::{StorageError, StorageResult};
 pub use models::{
     ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedChunk, PersistedFile,
-    PersistedIngest, TagWrite,
+    PersistedIngest, RecallChunkRecord, TagWrite,
 };
 pub use repository::SqliteRepository;
 pub use schema::{

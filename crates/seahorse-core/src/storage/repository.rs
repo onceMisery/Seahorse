@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use rusqlite::{params, Connection, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::models::{
     ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedChunk, PersistedFile,
-    PersistedIngest, TagWrite,
+    PersistedIngest, RecallChunkRecord, TagWrite,
 };
 use super::schema::{validate_schema_meta, SchemaExpectation, SchemaMetaSnapshot};
 use super::{StorageError, StorageResult};
@@ -38,6 +38,100 @@ impl SqliteRepository {
         validate_schema_meta(&self.connection, expected)
     }
 
+    pub fn find_file_by_hash(
+        &self,
+        namespace: &str,
+        file_hash: &str,
+    ) -> StorageResult<Option<PersistedFile>> {
+        let file = self
+            .connection
+            .query_row(
+                "SELECT id, namespace, filename, file_hash, ingest_status
+                 FROM files
+                 WHERE namespace = ?1 AND file_hash = ?2",
+                params![namespace, file_hash],
+                |row| {
+                    Ok(PersistedFile {
+                        id: row.get(0)?,
+                        namespace: row.get(1)?,
+                        filename: row.get(2)?,
+                        file_hash: row.get(3)?,
+                        ingest_status: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(file)
+    }
+
+    pub fn list_chunks_by_file_id(&self, file_id: i64) -> StorageResult<Vec<PersistedChunk>> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, file_id, chunk_index, content_hash, index_status
+             FROM chunks
+             WHERE file_id = ?1
+             ORDER BY chunk_index ASC",
+        )?;
+        let rows = statement.query_map([file_id], |row| {
+            Ok(PersistedChunk {
+                id: row.get(0)?,
+                file_id: row.get(1)?,
+                chunk_index: row.get(2)?,
+                content_hash: row.get(3)?,
+                index_status: row.get(4)?,
+            })
+        })?;
+
+        let mut chunks = Vec::new();
+        for row in rows {
+            chunks.push(row?);
+        }
+        Ok(chunks)
+    }
+
+    pub fn get_chunk_record(&self, chunk_id: i64) -> StorageResult<Option<RecallChunkRecord>> {
+        let record = self
+            .connection
+            .query_row(
+                "SELECT
+                    c.id,
+                    c.file_id,
+                    c.namespace,
+                    c.chunk_text,
+                    f.filename,
+                    f.source_type,
+                    COALESCE(c.metadata_json, f.metadata_json)
+                 FROM chunks c
+                 JOIN files f ON f.id = c.file_id
+                 WHERE c.id = ?1
+                   AND c.is_deleted = 0
+                   AND c.index_status != 'deleted'
+                   AND f.ingest_status != 'deleted'",
+                [chunk_id],
+                |row| {
+                    Ok(RecallChunkRecord {
+                        chunk_id: row.get(0)?,
+                        file_id: row.get(1)?,
+                        namespace: row.get(2)?,
+                        chunk_text: row.get(3)?,
+                        source_file: row.get(4)?,
+                        source_type: row.get(5)?,
+                        metadata_json: row.get(6)?,
+                        tags: Vec::new(),
+                    })
+                },
+            )
+            .optional()?;
+
+        match record {
+            Some(mut record) => {
+                record.tags = self.list_tags_by_chunk_id(record.chunk_id)?;
+                Ok(Some(record))
+            }
+            None => Ok(None),
+        }
+    }
+
     pub fn with_transaction<T, F>(&mut self, operation: F) -> StorageResult<T>
     where
         F: FnOnce(&Transaction<'_>) -> StorageResult<T>,
@@ -50,6 +144,70 @@ impl SqliteRepository {
 
     pub fn write_ingest_batch(&mut self, batch: &IngestWriteBatch) -> StorageResult<PersistedIngest> {
         self.with_transaction(|transaction| write_ingest_batch(transaction, batch))
+    }
+
+    pub fn update_indexing_result(
+        &mut self,
+        file_id: i64,
+        chunk_ids: &[i64],
+        file_status: &str,
+        chunk_status: &str,
+    ) -> StorageResult<()> {
+        self.with_transaction(|transaction| {
+            transaction.execute(
+                "UPDATE files SET ingest_status = ?1 WHERE id = ?2",
+                params![file_status, file_id],
+            )?;
+
+            for chunk_id in chunk_ids {
+                transaction.execute(
+                    "UPDATE chunks SET index_status = ?1 WHERE id = ?2",
+                    params![chunk_status, chunk_id],
+                )?;
+            }
+
+            Ok(())
+        })
+    }
+
+    pub fn enqueue_repair_task(
+        &mut self,
+        namespace: &str,
+        task_type: &str,
+        target_type: &str,
+        target_id: Option<i64>,
+        payload_json: Option<&str>,
+    ) -> StorageResult<i64> {
+        self.connection.execute(
+            "INSERT INTO repair_queue (
+                namespace,
+                task_type,
+                target_type,
+                target_id,
+                payload_json,
+                status
+            ) VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+            params![namespace, task_type, target_type, target_id, payload_json],
+        )?;
+
+        Ok(self.connection.last_insert_rowid())
+    }
+
+    fn list_tags_by_chunk_id(&self, chunk_id: i64) -> StorageResult<Vec<String>> {
+        let mut statement = self.connection.prepare(
+            "SELECT t.normalized_name
+             FROM chunk_tags ct
+             JOIN tags t ON t.id = ct.tag_id
+             WHERE ct.chunk_id = ?1
+             ORDER BY t.normalized_name ASC",
+        )?;
+        let rows = statement.query_map([chunk_id], |row| row.get::<_, String>(0))?;
+
+        let mut tags = Vec::new();
+        for row in rows {
+            tags.push(row?);
+        }
+        Ok(tags)
     }
 }
 
@@ -332,5 +490,106 @@ mod tests {
 
         assert_eq!(file_count, 0);
         assert_eq!(chunk_count, 0);
+    }
+
+    #[test]
+    fn finds_file_by_hash_and_lists_chunks() {
+        let mut repository = repository_with_schema();
+        let batch = IngestWriteBatch {
+            file: FileWrite::new("demo.txt", "hash-find-me"),
+            chunks: vec![ChunkWrite::new(0, "alpha", "chunk-find-me", "test-model", 3)],
+            tags: vec![],
+            chunk_tags: vec![],
+        };
+
+        let persisted = repository
+            .write_ingest_batch(&batch)
+            .expect("write ingest batch");
+
+        let file = repository
+            .find_file_by_hash("default", "hash-find-me")
+            .expect("find file")
+            .expect("file should exist");
+        let chunks = repository
+            .list_chunks_by_file_id(file.id)
+            .expect("list chunks");
+
+        assert_eq!(file.id, persisted.file.id);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].id, persisted.chunks[0].id);
+    }
+
+    #[test]
+    fn updates_indexing_result_and_enqueues_repair() {
+        let mut repository = repository_with_schema();
+        let batch = IngestWriteBatch {
+            file: FileWrite::new("demo.txt", "hash-status"),
+            chunks: vec![ChunkWrite::new(0, "alpha", "chunk-status", "test-model", 3)],
+            tags: vec![],
+            chunk_tags: vec![],
+        };
+
+        let persisted = repository
+            .write_ingest_batch(&batch)
+            .expect("write ingest batch");
+        let chunk_ids = persisted.chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>();
+
+        repository
+            .update_indexing_result(persisted.file.id, &chunk_ids, "partial", "failed")
+            .expect("update indexing result");
+        let repair_id = repository
+            .enqueue_repair_task(
+                "default",
+                "index_insert",
+                "file",
+                Some(persisted.file.id),
+                Some("{\"test\":true}"),
+            )
+            .expect("enqueue repair");
+
+        assert!(repair_id > 0);
+
+        let file = repository
+            .find_file_by_hash("default", "hash-status")
+            .expect("find file")
+            .expect("file exists");
+        let chunks = repository
+            .list_chunks_by_file_id(file.id)
+            .expect("list chunks");
+        let repair_count: i64 = repository
+            .connection
+            .query_row("SELECT COUNT(*) FROM repair_queue", [], |row| row.get(0))
+            .expect("count repair_queue");
+
+        assert_eq!(file.ingest_status, "partial");
+        assert_eq!(chunks[0].index_status, "failed");
+        assert_eq!(repair_count, 1);
+    }
+
+    #[test]
+    fn loads_chunk_record_with_joined_tags() {
+        let mut repository = repository_with_schema();
+        let batch = IngestWriteBatch {
+            file: FileWrite::new("doc.txt", "hash-record"),
+            chunks: vec![ChunkWrite::new(0, "alpha", "chunk-record", "test-model", 3)],
+            tags: vec![TagWrite::new("Project", "project"), TagWrite::new("Rust", "rust")],
+            chunk_tags: vec![
+                ChunkTagInsert::new(0, "project"),
+                ChunkTagInsert::new(0, "rust"),
+            ],
+        };
+
+        let persisted = repository
+            .write_ingest_batch(&batch)
+            .expect("write ingest batch");
+
+        let record = repository
+            .get_chunk_record(persisted.chunks[0].id)
+            .expect("load record")
+            .expect("record exists");
+
+        assert_eq!(record.chunk_id, persisted.chunks[0].id);
+        assert_eq!(record.source_file, "doc.txt");
+        assert_eq!(record.tags, vec!["project".to_owned(), "rust".to_owned()]);
     }
 }

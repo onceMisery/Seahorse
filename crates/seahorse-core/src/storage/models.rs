@@ -130,3 +130,15 @@ pub struct PersistedIngest {
     pub chunks: Vec<PersistedChunk>,
     pub tag_ids: BTreeMap<String, i64>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecallChunkRecord {
+    pub chunk_id: i64,
+    pub file_id: i64,
+    pub namespace: String,
+    pub chunk_text: String,
+    pub source_file: String,
+    pub source_type: Option<String>,
+    pub metadata_json: Option<String>,
+    pub tags: Vec<String>,
+}

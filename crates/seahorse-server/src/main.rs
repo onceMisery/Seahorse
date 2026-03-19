@@ -8,11 +8,12 @@ use state::AppState;
 
 #[tokio::main]
 async fn main() {
+    let state = AppState::new().expect("failed to initialize seahorse application state");
     let app = Router::new()
         .route("/ingest", post(handlers::ingest::post_ingest))
         .route("/recall", post(handlers::recall::post_recall))
         .route("/health", get(handlers::health::get_health))
-        .with_state(AppState);
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(listen_addr())
         .await
