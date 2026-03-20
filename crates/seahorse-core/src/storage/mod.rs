@@ -8,7 +8,7 @@ pub use error::{StorageError, StorageResult};
 pub use migrations::{apply_sqlite_migrations, LATEST_SCHEMA_VERSION};
 pub use models::{
     ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedChunk, PersistedFile,
-    MaintenanceJob, PersistedDeletion, PersistedIngest, PersistedReplacement,
+    MaintenanceJob, PersistedDeletion, PersistedIngest, PersistedReplacement, RepairTask,
     RecallChunkRecord, RebuildChunkRecord, StorageStatsSnapshot, TagWrite,
 };
 pub use repository::SqliteRepository;

@@ -2,6 +2,7 @@
 
 pub mod embedding;
 pub mod index;
+pub mod jobs;
 pub mod pipeline;
 pub mod storage;
 
@@ -9,6 +10,10 @@ pub use embedding::{EmbeddingError, EmbeddingProvider, EmbeddingResult, StubEmbe
 pub use index::{
     IndexEntry, IndexError, IndexResult, InMemoryVectorIndex, SearchHit, SearchRequest,
     VectorIndex,
+};
+pub use jobs::{
+    NoopRepairTaskExecutor, RepairTaskExecutor, RepairWorker, RepairWorkerConfig,
+    RepairWorkerError, RepairWorkerRunResult,
 };
 pub use pipeline::chunker::{chunk_text, Chunk, ChunkerConfig};
 pub use pipeline::hashing::{fnv1a_hash, stable_content_hash};
@@ -24,7 +29,7 @@ pub use storage::{
     apply_sqlite_migrations,
     ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedChunk, PersistedFile,
     MaintenanceJob, PersistedDeletion, PersistedIngest, PersistedReplacement,
-    RecallChunkRecord, RebuildChunkRecord, SchemaExpectation, SchemaMetaSnapshot,
+    RecallChunkRecord, RebuildChunkRecord, RepairTask, SchemaExpectation, SchemaMetaSnapshot,
     SqliteRepository, StorageError, StorageResult, StorageStatsSnapshot, TagWrite, LATEST_SCHEMA_VERSION,
     read_schema_meta,
     validate_schema_meta,

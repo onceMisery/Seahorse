@@ -5,7 +5,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::models::{
     ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedChunk, PersistedFile,
-    MaintenanceJob, PersistedDeletion, PersistedIngest, PersistedReplacement,
+    MaintenanceJob, PersistedDeletion, PersistedIngest, PersistedReplacement, RepairTask,
     RecallChunkRecord, RebuildChunkRecord, StorageStatsSnapshot, TagWrite,
 };
 use super::schema::{validate_schema_meta, SchemaExpectation, SchemaMetaSnapshot};
@@ -223,7 +223,171 @@ impl SqliteRepository {
             params![namespace, task_type, target_type, target_id, payload_json],
         )?;
 
+        self.set_schema_meta_value("index_state", "degraded")?;
+
         Ok(self.connection.last_insert_rowid())
+    }
+
+    pub fn claim_next_repair_task(
+        &mut self,
+        namespace: &str,
+        max_retry_count: u32,
+    ) -> StorageResult<Option<RepairTask>> {
+        const MAX_CLAIM_ATTEMPTS: usize = 8;
+
+        for _ in 0..MAX_CLAIM_ATTEMPTS {
+            match self.with_transaction(|transaction| {
+                let candidate_id = transaction
+                    .query_row(
+                        "SELECT id
+                         FROM repair_queue
+                         WHERE namespace = ?1
+                           AND status IN ('pending', 'failed')
+                           AND retry_count < ?2
+                         ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END ASC, id ASC
+                         LIMIT 1",
+                        params![namespace, i64::from(max_retry_count)],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?;
+
+                let Some(task_id) = candidate_id else {
+                    return Ok(ClaimRepairTaskResult::Empty);
+                };
+
+                let updated = transaction.execute(
+                    "UPDATE repair_queue
+                     SET status = 'running'
+                     WHERE id = ?1
+                       AND status IN ('pending', 'failed')",
+                    [task_id],
+                )?;
+
+                if updated == 0 {
+                    return Ok(ClaimRepairTaskResult::Contended);
+                }
+
+                let task = transaction
+                    .query_row(
+                        "SELECT
+                            id,
+                            namespace,
+                            task_type,
+                            target_type,
+                            target_id,
+                            payload_json,
+                            status,
+                            retry_count,
+                            last_error,
+                            created_at,
+                            updated_at
+                         FROM repair_queue
+                         WHERE id = ?1",
+                        [task_id],
+                        map_repair_task,
+                    )
+                    .optional()?
+                    .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+
+                Ok(ClaimRepairTaskResult::Claimed(task))
+            })? {
+                ClaimRepairTaskResult::Claimed(task) => return Ok(Some(task)),
+                ClaimRepairTaskResult::Empty => return Ok(None),
+                ClaimRepairTaskResult::Contended => continue,
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn get_repair_task(&self, task_id: i64) -> StorageResult<Option<RepairTask>> {
+        self.connection
+            .query_row(
+                "SELECT
+                    id,
+                    namespace,
+                    task_type,
+                    target_type,
+                    target_id,
+                    payload_json,
+                    status,
+                    retry_count,
+                    last_error,
+                    created_at,
+                    updated_at
+                 FROM repair_queue
+                 WHERE id = ?1",
+                [task_id],
+                map_repair_task,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn succeed_repair_task(&mut self, task_id: i64) -> StorageResult<()> {
+        self.connection.execute(
+            "UPDATE repair_queue
+             SET status = 'succeeded',
+                 last_error = NULL
+             WHERE id = ?1",
+            [task_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn fail_repair_task(
+        &mut self,
+        task_id: i64,
+        last_error: &str,
+        deadletter: bool,
+    ) -> StorageResult<()> {
+        let status = if deadletter { "deadletter" } else { "failed" };
+        self.connection.execute(
+            "UPDATE repair_queue
+             SET status = ?2,
+                 retry_count = retry_count + 1,
+                 last_error = ?3
+             WHERE id = ?1",
+            params![task_id, status, last_error],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn recover_running_repair_tasks(
+        &mut self,
+        namespace: &str,
+        max_retry_count: u32,
+        last_error: &str,
+    ) -> StorageResult<usize> {
+        let updated = self.connection.execute(
+            "UPDATE repair_queue
+             SET status = CASE
+                    WHEN retry_count + 1 >= ?2 THEN 'deadletter'
+                    ELSE 'failed'
+                 END,
+                 retry_count = retry_count + 1,
+                 last_error = ?3
+             WHERE namespace = ?1
+               AND status = 'running'",
+            params![namespace, i64::from(max_retry_count), last_error],
+        )?;
+
+        Ok(updated)
+    }
+
+    pub fn has_repair_backlog(&self, namespace: &str) -> StorageResult<bool> {
+        let backlog_count = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM repair_queue
+             WHERE namespace = ?1
+               AND status IN ('pending', 'running', 'failed', 'deadletter')",
+            [namespace],
+            |row| row.get::<_, i64>(0),
+        )?;
+
+        Ok(backlog_count > 0)
     }
 
     pub fn soft_delete_files(
@@ -303,6 +467,39 @@ impl SqliteRepository {
             .map_err(Into::into)
     }
 
+    pub fn list_active_maintenance_jobs(
+        &self,
+        job_type: &str,
+        namespace: &str,
+    ) -> StorageResult<Vec<MaintenanceJob>> {
+        let mut statement = self.connection.prepare(
+            "SELECT
+                id,
+                job_type,
+                namespace,
+                payload_json,
+                status,
+                progress,
+                result_summary,
+                error_message,
+                created_at,
+                started_at,
+                finished_at
+             FROM maintenance_jobs
+             WHERE job_type = ?1
+               AND namespace = ?2
+               AND status IN ('queued', 'running')
+             ORDER BY id DESC",
+        )?;
+        let rows = statement.query_map(params![job_type, namespace], map_maintenance_job)?;
+
+        let mut jobs = Vec::new();
+        for row in rows {
+            jobs.push(row?);
+        }
+        Ok(jobs)
+    }
+
     pub fn cancel_active_maintenance_jobs(
         &mut self,
         job_type: &str,
@@ -321,6 +518,20 @@ impl SqliteRepository {
         )?;
 
         Ok(updated)
+    }
+
+    pub fn cancel_maintenance_job(&mut self, job_id: i64, reason: &str) -> StorageResult<()> {
+        self.connection.execute(
+            "UPDATE maintenance_jobs
+             SET status = 'cancelled',
+                 error_message = ?2,
+                 finished_at = CURRENT_TIMESTAMP
+             WHERE id = ?1
+               AND status IN ('queued', 'running')",
+            params![job_id, reason],
+        )?;
+
+        Ok(())
     }
 
     pub fn mark_maintenance_job_running(
@@ -548,7 +759,7 @@ impl SqliteRepository {
             "SELECT COUNT(*)
              FROM repair_queue
              WHERE namespace = ?1
-               AND status IN ('pending', 'running')",
+               AND status IN ('pending', 'running', 'failed', 'deadletter')",
             [namespace],
             |row| row.get::<_, i64>(0),
         )?;
@@ -597,6 +808,28 @@ fn map_maintenance_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaintenanceJ
         started_at: row.get(9)?,
         finished_at: row.get(10)?,
     })
+}
+
+fn map_repair_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepairTask> {
+    Ok(RepairTask {
+        id: row.get(0)?,
+        namespace: row.get(1)?,
+        task_type: row.get(2)?,
+        target_type: row.get(3)?,
+        target_id: row.get(4)?,
+        payload_json: row.get(5)?,
+        status: row.get(6)?,
+        retry_count: row.get(7)?,
+        last_error: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+enum ClaimRepairTaskResult {
+    Claimed(RepairTask),
+    Empty,
+    Contended,
 }
 
 fn enable_foreign_keys(connection: &Connection) -> StorageResult<()> {
@@ -1183,23 +1416,45 @@ mod tests {
         let job = repository
             .create_maintenance_job("rebuild", "default", Some("{\"scope\":\"all\"}"))
             .expect("create maintenance job");
+        let newer_job = repository
+            .create_maintenance_job("rebuild", "default", Some("{\"scope\":\"missing_index\"}"))
+            .expect("create newer maintenance job");
         assert_eq!(job.status, "queued");
+        assert_eq!(newer_job.status, "queued");
 
         let active = repository
             .find_active_maintenance_job("rebuild", "default")
             .expect("find active maintenance job")
             .expect("active job exists");
-        assert_eq!(active.id, job.id);
+        assert_eq!(active.id, newer_job.id);
+
+        let active_jobs = repository
+            .list_active_maintenance_jobs("rebuild", "default")
+            .expect("list active maintenance jobs");
+        assert_eq!(active_jobs.len(), 2);
+        assert_eq!(active_jobs[0].id, newer_job.id);
+        assert_eq!(active_jobs[1].id, job.id);
 
         repository
-            .mark_maintenance_job_running(job.id, Some("running"))
+            .cancel_maintenance_job(job.id, "superseded")
+            .expect("cancel older job");
+
+        repository
+            .mark_maintenance_job_running(newer_job.id, Some("running"))
             .expect("mark running");
         repository
-            .finish_maintenance_job(job.id, "succeeded", Some("1/1"), Some("done"), None)
+            .finish_maintenance_job(newer_job.id, "succeeded", Some("1/1"), Some("done"), None)
             .expect("finish job");
 
-        let persisted = repository
+        let cancelled = repository
             .get_maintenance_job(job.id)
+            .expect("load cancelled maintenance job")
+            .expect("cancelled job should exist");
+        assert_eq!(cancelled.status, "cancelled");
+        assert_eq!(cancelled.error_message.as_deref(), Some("superseded"));
+
+        let persisted = repository
+            .get_maintenance_job(newer_job.id)
             .expect("load maintenance job")
             .expect("job should exist");
         assert_eq!(persisted.status, "succeeded");

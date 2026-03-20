@@ -1,12 +1,9 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+pub mod observability;
 
 #[derive(Debug, Serialize)]
 pub struct ResponseEnvelope<T> {
@@ -195,7 +192,7 @@ where
             success: true,
             data: Some(data),
             error: None,
-            request_id: next_request_id(),
+            request_id: current_request_id_or_fallback(),
         }),
     )
 }
@@ -219,7 +216,7 @@ where
                 message: message.into(),
                 retryable,
             }),
-            request_id: next_request_id(),
+            request_id: current_request_id_or_fallback(),
         }),
     )
 }
@@ -232,7 +229,16 @@ pub fn default_top_k() -> u32 {
     10
 }
 
-fn next_request_id() -> String {
+fn current_request_id_or_fallback() -> String {
+    observability::current_request_id().unwrap_or_else(current_timestamp_request_id)
+}
+
+fn current_timestamp_request_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
     let counter = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)

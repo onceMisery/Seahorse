@@ -179,6 +179,21 @@ pub struct MaintenanceJob {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepairTask {
+    pub id: i64,
+    pub namespace: String,
+    pub task_type: String,
+    pub target_type: String,
+    pub target_id: Option<i64>,
+    pub payload_json: Option<String>,
+    pub status: String,
+    pub retry_count: i64,
+    pub last_error: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageStatsSnapshot {
     pub chunk_count: usize,
     pub tag_count: usize,

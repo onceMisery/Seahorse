@@ -6,17 +6,23 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 use state::AppState;
 
 #[tokio::main]
 async fn main() {
+    init_tracing();
+
+    let addr = listen_addr();
     let state = AppState::new().expect("failed to initialize seahorse application state");
     let app = build_app(state);
 
-    let listener = tokio::net::TcpListener::bind(listen_addr())
+    let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .expect("failed to bind seahorse server listener");
+    info!(bind = %addr, "seahorse server listening");
 
     axum::serve(listener, app)
         .await
@@ -31,12 +37,26 @@ fn build_app(state: AppState) -> Router {
         .route("/admin/rebuild", post(handlers::rebuild::post_rebuild))
         .route("/admin/jobs/{job_id}", get(handlers::jobs::get_job))
         .route("/stats", get(handlers::stats::get_stats))
+        .route("/metrics", get(handlers::metrics::get_metrics))
         .route("/health", get(handlers::health::get_health))
         .with_state(state)
+        .layer(axum::middleware::from_fn(
+            api::observability::request_context_middleware,
+        ))
 }
 
 fn listen_addr() -> String {
     std::env::var("SEAHORSE_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:8080".to_owned())
+}
+
+fn init_tracing() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .json()
+        .try_init();
 }
 
 #[cfg(test)]
@@ -234,6 +254,54 @@ mod tests {
             Value::String(format!("job-{job_id}"))
         );
         assert!(final_body["data"]["started_at"].is_string());
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_cancels_stale_active_rebuild_jobs_and_resumes_latest() {
+        let (state, db_path) = test_state("rebuild-multi-recovery");
+        seed_rebuild_dataset(&state, "multi-recovery");
+        drop(state);
+
+        let stale_job_id = enqueue_rebuild_job(&db_path, "all", true);
+        let latest_job_id = enqueue_rebuild_job(&db_path, "all", false);
+        let recovered_state = AppState::new_with_db_path(
+            db_path
+                .to_str()
+                .expect("temp db path must be valid unicode"),
+        )
+        .expect("restart app state");
+        let app = build_app(recovered_state);
+
+        let latest_body = poll_job_until_terminal(app.clone(), &format!("job-{latest_job_id}")).await;
+        let stale_body = poll_job_until_terminal(app, &format!("job-{stale_job_id}")).await;
+
+        assert_eq!(latest_body["success"], Value::Bool(true));
+        assert_eq!(
+            latest_body["data"]["status"],
+            Value::String("succeeded".to_owned())
+        );
+        assert_eq!(
+            latest_body["data"]["job_id"],
+            Value::String(format!("job-{latest_job_id}"))
+        );
+
+        assert_eq!(stale_body["success"], Value::Bool(true));
+        assert_eq!(
+            stale_body["data"]["status"],
+            Value::String("cancelled".to_owned())
+        );
+        assert_eq!(
+            stale_body["data"]["job_id"],
+            Value::String(format!("job-{stale_job_id}"))
+        );
+        assert!(
+            stale_body["data"]["error_message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("superseded during startup recovery")
+        );
 
         cleanup_db_path(&db_path);
     }
