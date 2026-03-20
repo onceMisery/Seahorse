@@ -40,7 +40,7 @@ fn build_app(state: AppState) -> Router {
         .route("/metrics", get(handlers::metrics::get_metrics))
         .route("/health", get(handlers::health::get_health))
         .with_state(state)
-        .layer(axum::middleware::from_fn(
+        .route_layer(axum::middleware::from_fn(
             api::observability::request_context_middleware,
         ))
 }

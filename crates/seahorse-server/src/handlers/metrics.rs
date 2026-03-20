@@ -5,7 +5,7 @@ use axum::response::IntoResponse;
 use crate::api::observability;
 use crate::state::{AppState, AppStateError, HealthSnapshot, StatsSnapshot};
 
-const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
+const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 const INDEX_STATES: &[&str] = &["ready", "rebuilding", "degraded", "unavailable"];
 const HEALTH_STATUSES: &[&str] = &["ok", "degraded", "failed"];
 
@@ -144,9 +144,18 @@ fn append_runtime_metrics(lines: &mut Vec<String>, stats: &StatsSnapshot, health
         "Current index state as a one-hot gauge.",
         "gauge",
     );
+    let mut index_state_known = false;
     for state in INDEX_STATES {
-        let value = if stats.index_status == *state { 1 } else { 0 };
+        let value = if stats.index_status == *state {
+            index_state_known = true;
+            1
+        } else {
+            0
+        };
         lines.push(format!("seahorse_index_state{{state=\"{state}\"}} {value}"));
+    }
+    if !index_state_known {
+        lines.push("seahorse_index_state{state=\"unknown\"} 1".to_owned());
     }
 
     append_metric_help(
@@ -155,9 +164,18 @@ fn append_runtime_metrics(lines: &mut Vec<String>, stats: &StatsSnapshot, health
         "Current health status as a one-hot gauge.",
         "gauge",
     );
+    let mut health_status_known = false;
     for status in HEALTH_STATUSES {
-        let value = if health.status == *status { 1 } else { 0 };
+        let value = if health.status == *status {
+            health_status_known = true;
+            1
+        } else {
+            0
+        };
         lines.push(format!("seahorse_health_status{{status=\"{status}\"}} {value}"));
+    }
+    if !health_status_known {
+        lines.push("seahorse_health_status{status=\"unknown\"} 1".to_owned());
     }
 }
 
@@ -177,15 +195,15 @@ fn map_metrics_error(error: AppStateError) -> (StatusCode, [(axum::http::header:
     let (status, body) = match error {
         AppStateError::Unavailable { message } => (
             StatusCode::SERVICE_UNAVAILABLE,
-            format!("# metrics unavailable: {message}\n"),
+            format!("# metrics unavailable: {}\n", escape_label_value(&message)),
         ),
         AppStateError::Storage(source) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("# storage error: {source}\n"),
+            format!("# storage error: {}\n", escape_label_value(&source.to_string())),
         ),
         AppStateError::NotFound { message } => (
             StatusCode::NOT_FOUND,
-            format!("# metrics not found: {message}\n"),
+            format!("# metrics not found: {}\n", escape_label_value(&message)),
         ),
         AppStateError::Ingest(_)
         | AppStateError::Forget(_)
