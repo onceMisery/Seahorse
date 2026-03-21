@@ -46,6 +46,9 @@ impl VectorIndex for InMemoryVectorIndex {
     fn insert(&mut self, entries: &[IndexEntry]) -> IndexResult<()> {
         for entry in entries {
             self.validate_vector(&entry.vector)?;
+        }
+
+        for entry in entries {
             self.entries.insert(
                 entry.chunk_id,
                 StoredEntry {

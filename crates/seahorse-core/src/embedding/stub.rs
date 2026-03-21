@@ -4,10 +4,18 @@ const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
 const FNV_PRIME: u64 = 0x100000001b3;
 
 #[derive(Debug, Clone)]
+pub enum StubFailureMode {
+    Timeout { timeout_ms: u64 },
+    Failure { message: String },
+    DimensionMismatch { actual: usize },
+}
+
+#[derive(Debug, Clone)]
 pub struct StubEmbeddingProvider {
     model_id: String,
     dimension: usize,
     max_batch_size: usize,
+    failure_mode: Option<StubFailureMode>,
 }
 
 impl StubEmbeddingProvider {
@@ -27,11 +35,39 @@ impl StubEmbeddingProvider {
             model_id: model_id.into(),
             dimension,
             max_batch_size: max_batch_size.max(1),
+            failure_mode: None,
         })
     }
 
     pub fn from_dimension(dimension: usize) -> EmbeddingResult<Self> {
         Self::new(format!("stub-{dimension}d"), dimension, 32)
+    }
+
+    pub fn with_failure_mode(mut self, failure_mode: StubFailureMode) -> Self {
+        self.failure_mode = Some(failure_mode);
+        self
+    }
+
+    fn check_failure_mode(&self) -> EmbeddingResult<()> {
+        match &self.failure_mode {
+            Some(StubFailureMode::Timeout { timeout_ms }) => {
+                Err(EmbeddingError::ProviderTimeout {
+                    provider: "stub",
+                    timeout_ms: *timeout_ms,
+                })
+            }
+            Some(StubFailureMode::Failure { message }) => Err(EmbeddingError::ProviderFailure {
+                provider: "stub",
+                message: message.clone(),
+            }),
+            Some(StubFailureMode::DimensionMismatch { actual }) => {
+                Err(EmbeddingError::DimensionMismatch {
+                    expected: self.dimension,
+                    actual: *actual,
+                })
+            }
+            None => Ok(()),
+        }
     }
 
     fn embed_internal(&self, text: &str) -> Vec<f32> {
@@ -53,16 +89,19 @@ impl Default for StubEmbeddingProvider {
             model_id: "stub-8d".to_owned(),
             dimension: 8,
             max_batch_size: 32,
+            failure_mode: None,
         }
     }
 }
 
 impl EmbeddingProvider for StubEmbeddingProvider {
     fn embed(&self, text: &str) -> EmbeddingResult<Vec<f32>> {
+        self.check_failure_mode()?;
         Ok(self.embed_internal(text))
     }
 
     fn embed_batch(&self, texts: &[String]) -> EmbeddingResult<Vec<Vec<f32>>> {
+        self.check_failure_mode()?;
         if texts.len() > self.max_batch_size {
             return Err(EmbeddingError::ProviderFailure {
                 provider: "stub",

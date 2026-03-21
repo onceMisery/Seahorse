@@ -6,7 +6,9 @@ pub mod jobs;
 pub mod pipeline;
 pub mod storage;
 
-pub use embedding::{EmbeddingError, EmbeddingProvider, EmbeddingResult, StubEmbeddingProvider};
+pub use embedding::{
+    EmbeddingError, EmbeddingProvider, EmbeddingResult, StubEmbeddingProvider, StubFailureMode,
+};
 pub use index::{
     IndexEntry, IndexError, IndexResult, InMemoryVectorIndex, SearchHit, SearchRequest,
     VectorIndex,
