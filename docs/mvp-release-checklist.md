@@ -20,6 +20,9 @@
 - 已确认服务仅绑定本地或受信内网地址
 - 已确认当前 embedding 配置与实现一致
 - 已确认 migration 文件齐全
+- 已确认 `./config/seahorse.toml` 可被读取（不存在时将走默认配置）
+- 已确认 `[observability]` 中 `enable_metrics` / `metrics_path` 与预期一致
+- 已确认 `metrics_path` 为空时回退 `/metrics`，不带前导 `/` 时会自动补齐
 
 ## 4. 存储与恢复
 
@@ -37,6 +40,7 @@
 - `GET /admin/jobs/{job_id}` 可调用
 - `GET /health` 可调用
 - `GET /stats` 可调用
+- 若开启 metrics：`GET /metrics`（或配置指定路径）可调用并返回 Prometheus 文本格式
 
 建议至少完成一次人工链路：
 
@@ -45,6 +49,19 @@
 3. forget 后 recall 不再返回
 4. rebuild 成功完成
 5. rebuild 后 health / stats 正常
+6. 若开启 metrics，确认可抓取到核心指标：
+   - `seahorse_http_requests_total`
+   - `seahorse_http_request_errors_total`
+   - `seahorse_http_request_latency_ms_max`
+   - `seahorse_index_state`
+   - `seahorse_health_status`
+
+建议至少完成一组告警规则验证（手工或预发布环境）：
+
+1. `seahorse_health_status{status="failed"} == 1` 可触发告警
+2. `seahorse_index_state{state="degraded"} == 1` 持续触发告警
+3. `error_rate > 5%`（基于 `request_errors_total / requests_total`）可触发告警
+4. 告警恢复后可自动清除
 
 ## 6. 状态与可恢复性
 
@@ -60,7 +77,7 @@
 
 - `repair_queue` 完整自动修复闭环
 - 结构化请求日志完整接入
-- metrics 导出与告警规则
+- 告警规则在监控平台落地（当前仅提供 MVP 建议阈值）
 - 自动化 contract / E2E / 故障注入测试
 - `1 万 chunk` 基线性能验收
 

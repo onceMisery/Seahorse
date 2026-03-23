@@ -6,13 +6,13 @@
 
 - 单 namespace，固定为 `default`
 - SQLite 作为唯一事实源
-- server 通过 REST API 暴露 `ingest` / `recall` / `forget` / `rebuild` / `jobs` / `stats` / `health`
+- server 通过 REST API 暴露 `ingest` / `recall` / `forget` / `rebuild` / `jobs` / `stats` / `health` / `metrics`
 - 部署目标为本地环境或受信内网
 
 以下能力当前不应被视为已完成：
 
 - `repair_queue` 仅具备最小状态机与 worker 框架，尚未接入完整运行调度
-- observability 仅开始接入 `tracing` 依赖，尚未完成完整结构化日志与 metrics 导出
+- observability 已提供基础请求日志与 Prometheus 文本指标，尚未接入分位数/直方图等高级观测能力
 - 当前未在可用 Rust 工具链环境下完成编译、自动化测试与性能验收
 
 ## 2. 部署前检查
@@ -31,6 +31,8 @@
 - SQLite 文件所在目录
 - embedding 配置：当前默认使用 stub provider
 - server 监听地址：仅绑定本地或内网地址
+- `./config/seahorse.toml` 的 `[observability]` 段
+- `observability.enable_metrics` 与 `observability.metrics_path` 是否与 Prometheus 抓取配置一致
 
 ## 3. 首次部署
 
@@ -38,10 +40,12 @@
 
 1. 准备工作目录，例如 `./data/`
 2. 设置数据库路径，例如 `./data/seahorse.db`
-3. 启动服务，让程序自动执行 SQLite migration
-4. 调用 `GET /health`，确认服务可启动
-5. 调用 `GET /stats`，确认基础统计可读
-6. 手工执行一次最小链路：
+3. 准备 `./config/seahorse.toml`（如不提供则使用默认：开启 metrics，路径 `/metrics`）
+4. 启动服务，让程序自动执行 SQLite migration
+5. 调用 `GET /health`，确认服务可启动
+6. 调用 `GET /stats`，确认基础统计可读
+7. 若开启 metrics，调用 `GET /metrics`，确认返回 `200` 且 `Content-Type: text/plain; version=0.0.4`
+8. 手工执行一次最小链路：
    - `POST /ingest`
    - `POST /recall`
    - `POST /forget`
@@ -63,12 +67,26 @@
   - `deleted_chunk_count`
   - `repair_queue_size`
   - `index_status`
+- `GET /metrics`（或配置指定路径）
+  - `seahorse_http_requests_total{scope="total"}`：总请求数
+  - `seahorse_http_request_errors_total{scope="total"}`：错误请求数（HTTP >= 400）
+  - `seahorse_http_request_latency_ms_max{scope="total"}`：最大请求延迟（毫秒）
+  - `seahorse_index_state{state="..."}`：索引状态 one-hot 指标
+  - `seahorse_health_status{status="..."}`：健康状态 one-hot 指标
 
 推荐人工判断规则：
 
 - `repair_queue_size` 持续增长：视为需要人工介入
 - `index_status = rebuilding` 长时间不结束：优先检查 `maintenance_jobs`
 - `index_status = degraded` 且未在维护窗口：视为异常
+- `request_errors_total / requests_total` 持续上升：优先检查近 5 分钟错误请求与慢请求
+
+建议最低告警规则（MVP）：
+
+1. 可用性告警：`seahorse_health_status{status="failed"} == 1` 持续 1 分钟。
+2. 索引降级告警：`seahorse_index_state{state="degraded"} == 1` 持续 10 分钟（排除计划内维护窗口）。
+3. 错误率告警：`rate(seahorse_http_request_errors_total{scope="total"}[5m]) / clamp_min(rate(seahorse_http_requests_total{scope="total"}[5m]), 1) > 0.05` 持续 10 分钟。
+4. 延迟突增告警：`seahorse_http_request_latency_ms_max{scope="total"} > 1000` 持续 10 分钟。
 
 ## 5. SQLite 备份
 
@@ -180,7 +198,7 @@
 - 无正式发布版编译验证记录
 - 无已完成的 E2E 发布验收记录
 - 无 `1 万 chunk` 基线性能验收结果
-- 无完整 metrics 导出与告警规则
+- 告警规则仅有 MVP 建议阈值，尚未在统一监控平台完成落地验证
 - 无完整 repair worker 调度与生产级恢复闭环
 
 因此当前更准确的定位是：

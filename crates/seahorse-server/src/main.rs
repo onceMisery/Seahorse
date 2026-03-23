@@ -1,4 +1,5 @@
 mod api;
+mod config;
 mod handlers;
 mod state;
 
@@ -9,6 +10,7 @@ use axum::{
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+use config::{load_observability_config, ObservabilityConfig};
 use state::AppState;
 
 #[tokio::main]
@@ -17,7 +19,17 @@ async fn main() {
 
     let addr = listen_addr();
     let state = AppState::new().expect("failed to initialize seahorse application state");
-    let app = build_app(state);
+    let observability_config = load_observability_config();
+    let app = build_app_with_observability(state, &observability_config);
+
+    if observability_config.enable_metrics {
+        info!(
+            metrics_path = %observability_config.metrics_path,
+            "metrics endpoint enabled"
+        );
+    } else {
+        info!("metrics endpoint disabled by configuration");
+    }
 
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -30,15 +42,31 @@ async fn main() {
 }
 
 fn build_app(state: AppState) -> Router {
-    Router::new()
+    let observability_config = ObservabilityConfig::default();
+    build_app_with_observability(state, &observability_config)
+}
+
+fn build_app_with_observability(
+    state: AppState,
+    observability_config: &ObservabilityConfig,
+) -> Router {
+    let mut app = Router::new()
         .route("/ingest", post(handlers::ingest::post_ingest))
         .route("/recall", post(handlers::recall::post_recall))
         .route("/forget", post(handlers::forget::post_forget))
         .route("/admin/rebuild", post(handlers::rebuild::post_rebuild))
         .route("/admin/jobs/{job_id}", get(handlers::jobs::get_job))
         .route("/stats", get(handlers::stats::get_stats))
-        .route("/metrics", get(handlers::metrics::get_metrics))
-        .route("/health", get(handlers::health::get_health))
+        .route("/health", get(handlers::health::get_health));
+
+    if observability_config.enable_metrics {
+        app = app.route(
+            &observability_config.metrics_path,
+            get(handlers::metrics::get_metrics),
+        );
+    }
+
+    app
         .with_state(state)
         .route_layer(axum::middleware::from_fn(
             api::observability::request_context_middleware,
