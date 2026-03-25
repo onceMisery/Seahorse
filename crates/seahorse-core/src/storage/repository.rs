@@ -4,9 +4,9 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::models::{
-    ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedChunk, PersistedFile,
-    MaintenanceJob, PersistedDeletion, PersistedIngest, PersistedReplacement, RepairTask,
-    RecallChunkRecord, RebuildChunkRecord, StorageStatsSnapshot, TagWrite,
+    ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, MaintenanceJob, PersistedChunk,
+    PersistedDeletion, PersistedFile, PersistedIngest, PersistedReplacement, RebuildChunkRecord,
+    RecallChunkRecord, RepairTask, StorageStatsSnapshot, TagWrite,
 };
 use super::schema::{validate_schema_meta, SchemaExpectation, SchemaMetaSnapshot};
 use super::{StorageError, StorageResult};
@@ -157,7 +157,10 @@ impl SqliteRepository {
         Ok(output)
     }
 
-    pub fn write_ingest_batch(&mut self, batch: &IngestWriteBatch) -> StorageResult<PersistedIngest> {
+    pub fn write_ingest_batch(
+        &mut self,
+        batch: &IngestWriteBatch,
+    ) -> StorageResult<PersistedIngest> {
         self.with_transaction(|transaction| write_ingest_batch(transaction, batch))
     }
 
@@ -329,7 +332,8 @@ impl SqliteRepository {
             "UPDATE repair_queue
              SET status = 'succeeded',
                  last_error = NULL
-             WHERE id = ?1",
+             WHERE id = ?1
+               AND status = 'running'",
             [task_id],
         )?;
 
@@ -348,7 +352,8 @@ impl SqliteRepository {
              SET status = ?2,
                  retry_count = retry_count + 1,
                  last_error = ?3
-             WHERE id = ?1",
+             WHERE id = ?1
+               AND status = 'running'",
             params![task_id, status, last_error],
         )?;
 
@@ -397,7 +402,11 @@ impl SqliteRepository {
     ) -> StorageResult<PersistedDeletion> {
         self.with_transaction(|transaction| {
             Ok(PersistedDeletion {
-                deleted_chunk_ids: soft_delete_files_in_transaction(transaction, namespace, file_ids)?,
+                deleted_chunk_ids: soft_delete_files_in_transaction(
+                    transaction,
+                    namespace,
+                    file_ids,
+                )?,
             })
         })
     }
@@ -409,7 +418,11 @@ impl SqliteRepository {
     ) -> StorageResult<PersistedDeletion> {
         self.with_transaction(|transaction| {
             Ok(PersistedDeletion {
-                deleted_chunk_ids: soft_delete_chunks_in_transaction(transaction, namespace, chunk_ids)?,
+                deleted_chunk_ids: soft_delete_chunks_in_transaction(
+                    transaction,
+                    namespace,
+                    chunk_ids,
+                )?,
             })
         })
     }
@@ -544,7 +557,8 @@ impl SqliteRepository {
              SET status = 'running',
                  progress = ?2,
                  started_at = COALESCE(started_at, CURRENT_TIMESTAMP)
-             WHERE id = ?1",
+             WHERE id = ?1
+               AND status IN ('queued', 'running')",
             params![job_id, progress],
         )?;
 
@@ -566,7 +580,8 @@ impl SqliteRepository {
                  result_summary = ?4,
                  error_message = ?5,
                  finished_at = CURRENT_TIMESTAMP
-             WHERE id = ?1",
+             WHERE id = ?1
+               AND status IN ('queued', 'running')",
             params![job_id, status, progress, result_summary, error_message],
         )?;
 
@@ -858,12 +873,11 @@ fn write_ingest_batch(
     }
 
     for link in &batch.chunk_tags {
-        let chunk_id = chunk_ids
-            .get(&link.chunk_index)
-            .copied()
-            .ok_or_else(|| StorageError::InvalidBatchReference {
+        let chunk_id = chunk_ids.get(&link.chunk_index).copied().ok_or_else(|| {
+            StorageError::InvalidBatchReference {
                 message: format!("chunk_index={} not found in batch", link.chunk_index),
-            })?;
+            }
+        })?;
         let tag_id = tag_ids
             .get(&link.tag_normalized_name)
             .copied()
@@ -909,7 +923,8 @@ fn soft_delete_files_in_transaction(
     )?;
 
     for file_id in &unique_file_ids {
-        let rows = select_chunks.query_map(params![namespace, file_id], |row| row.get::<_, i64>(0))?;
+        let rows =
+            select_chunks.query_map(params![namespace, file_id], |row| row.get::<_, i64>(0))?;
         for row in rows {
             deleted_chunk_ids.push(row?);
         }
@@ -1138,7 +1153,9 @@ mod tests {
     use rusqlite::Connection;
 
     use super::SqliteRepository;
-    use crate::storage::models::{ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, TagWrite};
+    use crate::storage::models::{
+        ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, TagWrite,
+    };
     use crate::storage::{
         apply_sqlite_migrations, SchemaExpectation, StorageError, LATEST_SCHEMA_VERSION,
     };
@@ -1153,7 +1170,12 @@ mod tests {
     fn validates_schema_through_repository() {
         let repository = repository_with_schema();
         let snapshot = repository
-            .validate_schema(&SchemaExpectation::new(LATEST_SCHEMA_VERSION, "1", "unknown", 0))
+            .validate_schema(&SchemaExpectation::new(
+                LATEST_SCHEMA_VERSION,
+                "1",
+                "unknown",
+                0,
+            ))
             .expect("schema valid");
 
         assert_eq!(snapshot.schema_version, LATEST_SCHEMA_VERSION);
@@ -1215,7 +1237,13 @@ mod tests {
         let mut repository = repository_with_schema();
         let batch = IngestWriteBatch {
             file: FileWrite::new("demo.txt", "file-hash-rollback"),
-            chunks: vec![ChunkWrite::new(0, "alpha", "chunk-hash-rollback", "test-model", 3)],
+            chunks: vec![ChunkWrite::new(
+                0,
+                "alpha",
+                "chunk-hash-rollback",
+                "test-model",
+                3,
+            )],
             tags: vec![TagWrite::new("Project", "project")],
             chunk_tags: vec![ChunkTagInsert::new(0, "missing-tag")],
         };
@@ -1247,7 +1275,13 @@ mod tests {
         let mut repository = repository_with_schema();
         let batch = IngestWriteBatch {
             file: FileWrite::new("demo.txt", "hash-find-me"),
-            chunks: vec![ChunkWrite::new(0, "alpha", "chunk-find-me", "test-model", 3)],
+            chunks: vec![ChunkWrite::new(
+                0,
+                "alpha",
+                "chunk-find-me",
+                "test-model",
+                3,
+            )],
             tags: vec![],
             chunk_tags: vec![],
         };
@@ -1282,7 +1316,11 @@ mod tests {
         let persisted = repository
             .write_ingest_batch(&batch)
             .expect("write ingest batch");
-        let chunk_ids = persisted.chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>();
+        let chunk_ids = persisted
+            .chunks
+            .iter()
+            .map(|chunk| chunk.id)
+            .collect::<Vec<_>>();
 
         repository
             .update_indexing_result(persisted.file.id, &chunk_ids, "partial", "failed")
@@ -1322,7 +1360,10 @@ mod tests {
         let batch = IngestWriteBatch {
             file: FileWrite::new("doc.txt", "hash-record"),
             chunks: vec![ChunkWrite::new(0, "alpha", "chunk-record", "test-model", 3)],
-            tags: vec![TagWrite::new("Project", "project"), TagWrite::new("Rust", "rust")],
+            tags: vec![
+                TagWrite::new("Project", "project"),
+                TagWrite::new("Rust", "rust"),
+            ],
             chunk_tags: vec![
                 ChunkTagInsert::new(0, "project"),
                 ChunkTagInsert::new(0, "rust"),
@@ -1348,7 +1389,13 @@ mod tests {
         let mut repository = repository_with_schema();
         let batch = IngestWriteBatch {
             file: FileWrite::new("doc.txt", "hash-soft-delete"),
-            chunks: vec![ChunkWrite::new(0, "alpha", "chunk-soft-delete", "test-model", 3)],
+            chunks: vec![ChunkWrite::new(
+                0,
+                "alpha",
+                "chunk-soft-delete",
+                "test-model",
+                3,
+            )],
             tags: vec![],
             chunk_tags: vec![],
         };
@@ -1463,11 +1510,151 @@ mod tests {
     }
 
     #[test]
+    fn guarded_repair_task_success_does_not_overwrite_recovered_failed_state() {
+        let mut repository = repository_with_schema();
+        repository
+            .enqueue_repair_task(
+                "default",
+                "index_insert",
+                "chunk",
+                Some(1),
+                Some("{\"test\":true}"),
+            )
+            .expect("enqueue repair task");
+
+        let claimed = repository
+            .claim_next_repair_task("default", 3)
+            .expect("claim repair task")
+            .expect("repair task should be claimed");
+        assert_eq!(claimed.status, "running");
+        let task_id = claimed.id;
+
+        let recovered = repository
+            .recover_running_repair_tasks("default", 3, "recovered after restart")
+            .expect("recover running repair tasks");
+        assert_eq!(recovered, 1);
+
+        repository
+            .succeed_repair_task(task_id)
+            .expect("late repair task success should not fail");
+
+        let task = repository
+            .get_repair_task(task_id)
+            .expect("load repair task")
+            .expect("repair task should exist");
+        assert_eq!(task.status, "failed");
+        assert_eq!(task.retry_count, 1);
+        assert_eq!(task.last_error.as_deref(), Some("recovered after restart"));
+    }
+
+    #[test]
+    fn guarded_repair_task_failure_does_not_overwrite_recovered_deadletter_state() {
+        let mut repository = repository_with_schema();
+        repository
+            .enqueue_repair_task(
+                "default",
+                "index_insert",
+                "chunk",
+                Some(1),
+                Some("{\"test\":true}"),
+            )
+            .expect("enqueue repair task");
+
+        let claimed = repository
+            .claim_next_repair_task("default", 1)
+            .expect("claim repair task")
+            .expect("repair task should be claimed");
+        assert_eq!(claimed.status, "running");
+        let task_id = claimed.id;
+
+        let recovered = repository
+            .recover_running_repair_tasks("default", 1, "recovered into deadletter")
+            .expect("recover running repair tasks");
+        assert_eq!(recovered, 1);
+
+        repository
+            .fail_repair_task(task_id, "late repair failure", false)
+            .expect("late repair task failure should not fail");
+
+        let task = repository
+            .get_repair_task(task_id)
+            .expect("load repair task")
+            .expect("repair task should exist");
+        assert_eq!(task.status, "deadletter");
+        assert_eq!(task.retry_count, 1);
+        assert_eq!(
+            task.last_error.as_deref(),
+            Some("recovered into deadletter")
+        );
+    }
+
+    #[test]
+    fn guarded_mark_maintenance_job_running_does_not_revive_cancelled_job() {
+        let mut repository = repository_with_schema();
+        let job = repository
+            .create_maintenance_job("rebuild", "default", Some("{\"scope\":\"all\"}"))
+            .expect("create maintenance job");
+
+        repository
+            .cancel_maintenance_job(job.id, "cancelled before worker started")
+            .expect("cancel maintenance job");
+        repository
+            .mark_maintenance_job_running(job.id, Some("late progress"))
+            .expect("late mark running should not fail");
+
+        let persisted = repository
+            .get_maintenance_job(job.id)
+            .expect("load maintenance job")
+            .expect("maintenance job should exist");
+        assert_eq!(persisted.status, "cancelled");
+        assert_eq!(
+            persisted.error_message.as_deref(),
+            Some("cancelled before worker started")
+        );
+        assert_eq!(persisted.progress, None);
+        assert_eq!(persisted.started_at, None);
+    }
+
+    #[test]
+    fn guarded_finish_maintenance_job_does_not_overwrite_terminal_state() {
+        let mut repository = repository_with_schema();
+        let job = repository
+            .create_maintenance_job("rebuild", "default", Some("{\"scope\":\"all\"}"))
+            .expect("create maintenance job");
+
+        repository
+            .mark_maintenance_job_running(job.id, Some("1/2"))
+            .expect("mark maintenance job running");
+        repository
+            .finish_maintenance_job(job.id, "succeeded", Some("2/2"), Some("done"), None)
+            .expect("finish maintenance job");
+
+        repository
+            .finish_maintenance_job(job.id, "failed", Some("2/2"), None, Some("late failure"))
+            .expect("late finish should not fail");
+
+        let persisted = repository
+            .get_maintenance_job(job.id)
+            .expect("load maintenance job")
+            .expect("maintenance job should exist");
+        assert_eq!(persisted.status, "succeeded");
+        assert_eq!(persisted.progress.as_deref(), Some("2/2"));
+        assert_eq!(persisted.result_summary.as_deref(), Some("done"));
+        assert_eq!(persisted.error_message, None);
+    }
+
+    #[test]
     fn lists_rebuild_targets_and_refreshes_file_status() {
         let mut repository = repository_with_schema();
         let batch = IngestWriteBatch {
             file: FileWrite::new("rebuild.txt", "hash-rebuild"),
-            chunks: vec![ChunkWrite::new(0, "alpha", "chunk-rebuild", "test-model", 3)],
+            chunks: vec![ChunkWrite::new(
+                0,
+                "alpha",
+                "chunk-rebuild",
+                "test-model",
+                3,
+            )],
             tags: vec![],
             chunk_tags: vec![],
         };
@@ -1476,7 +1663,12 @@ mod tests {
             .write_ingest_batch(&batch)
             .expect("write ingest batch");
         repository
-            .update_indexing_result(persisted.file.id, &[persisted.chunks[0].id], "partial", "failed")
+            .update_indexing_result(
+                persisted.file.id,
+                &[persisted.chunks[0].id],
+                "partial",
+                "failed",
+            )
             .expect("mark chunk failed");
 
         let all_chunks = repository
@@ -1531,7 +1723,11 @@ mod tests {
         let persisted = repository
             .write_ingest_batch(&batch)
             .expect("write ingest batch");
-        let chunk_ids = persisted.chunks.iter().map(|chunk| chunk.id).collect::<Vec<_>>();
+        let chunk_ids = persisted
+            .chunks
+            .iter()
+            .map(|chunk| chunk.id)
+            .collect::<Vec<_>>();
         repository
             .update_indexing_result(persisted.file.id, &chunk_ids, "ready", "ready")
             .expect("mark chunks ready");
@@ -1539,7 +1735,13 @@ mod tests {
             .soft_delete_chunks("default", &[persisted.chunks[1].id])
             .expect("soft delete second chunk");
         repository
-            .enqueue_repair_task("default", "index_insert", "chunk", Some(persisted.chunks[0].id), None)
+            .enqueue_repair_task(
+                "default",
+                "index_insert",
+                "chunk",
+                Some(persisted.chunks[0].id),
+                None,
+            )
             .expect("enqueue repair");
         repository
             .set_schema_meta_value("index_state", "degraded")

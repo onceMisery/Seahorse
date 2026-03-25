@@ -45,6 +45,7 @@ pub struct SourceInput {
 
 #[derive(Debug, Deserialize)]
 pub struct IngestOptions {
+    #[allow(dead_code)]
     #[serde(default)]
     pub chunk_mode: Option<String>,
     #[serde(default)]

@@ -1,28 +1,34 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusqlite::{params, Connection};
+use seahorse_core::{
+    apply_sqlite_migrations, EmbeddingProvider, ForgetError, ForgetPipeline,
+    ForgetRequest as CoreForgetRequest, ForgetResult as CoreForgetResult, InMemoryVectorIndex,
+    IndexEntry, IngestError, IngestPipeline, IngestRequest as CoreIngestRequest,
+    IngestResult as CoreIngestResult, MaintenanceJob, RebuildChunkRecord, RebuildError,
+    RebuildRequest as CoreRebuildRequest, RebuildScope, RecallError, RecallPipeline,
+    RecallRequest as CoreRecallRequest, RecallResult as CoreRecallResult, RepairTask,
+    RepairTaskExecutor, RepairWorker, RepairWorkerConfig, SqliteRepository, StorageError,
+    StubEmbeddingProvider, VectorIndex,
+};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::json;
-use seahorse_core::{
-    EmbeddingProvider, InMemoryVectorIndex, IndexEntry, IngestError, IngestPipeline,
-    IngestRequest as CoreIngestRequest, IngestResult as CoreIngestResult, ForgetError,
-    ForgetPipeline, ForgetRequest as CoreForgetRequest, ForgetResult as CoreForgetResult,
-    MaintenanceJob, RecallError, RecallPipeline, RecallRequest as CoreRecallRequest,
-    RecallResult as CoreRecallResult, RebuildChunkRecord, RebuildError,
-    RebuildRequest as CoreRebuildRequest, RebuildScope, RepairTask, RepairTaskExecutor,
-    RepairWorker, RepairWorkerConfig, SqliteRepository, StorageError, StubEmbeddingProvider,
-    VectorIndex, apply_sqlite_migrations,
-};
 
 const DEFAULT_DB_PATH: &str = "./data/seahorse.db";
 const DEFAULT_EMBEDDING_DIMENSION: usize = 1024;
 const DEFAULT_NAMESPACE: &str = "default";
+#[cfg(test)]
+const REPAIR_POLL_INTERVAL: Duration = Duration::from_millis(25);
+#[cfg(not(test))]
 const REPAIR_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const REPAIR_RECOVERY_ERROR: &str = "repair task recovered after unclean shutdown";
 const REPAIR_WORKER_CONFIG: RepairWorkerConfig = RepairWorkerConfig {
@@ -31,11 +37,320 @@ const REPAIR_WORKER_CONFIG: RepairWorkerConfig = RepairWorkerConfig {
 };
 
 #[derive(Debug, Clone)]
+struct RuntimeConfig {
+    rebuild_watchdog_interval: Duration,
+    rebuild_stale_after: Duration,
+    repair_watchdog_interval: Duration,
+    repair_stale_after: Duration,
+    repair_restart_backoff_initial: Duration,
+    repair_restart_backoff_max: Duration,
+}
+
+impl RuntimeConfig {
+    fn production() -> Self {
+        if cfg!(test) {
+            return Self {
+                rebuild_watchdog_interval: Duration::from_secs(60),
+                rebuild_stale_after: Duration::from_secs(60),
+                repair_watchdog_interval: Duration::from_secs(60),
+                repair_stale_after: Duration::from_secs(60),
+                repair_restart_backoff_initial: Duration::from_millis(250),
+                repair_restart_backoff_max: Duration::from_secs(2),
+            };
+        }
+
+        Self {
+            rebuild_watchdog_interval: Duration::from_millis(250),
+            rebuild_stale_after: Duration::from_secs(10),
+            repair_watchdog_interval: Duration::from_millis(250),
+            repair_stale_after: Duration::from_secs(10),
+            repair_restart_backoff_initial: Duration::from_millis(250),
+            repair_restart_backoff_max: Duration::from_secs(2),
+        }
+    }
+
+    #[cfg(test)]
+    fn fast_for_tests() -> Self {
+        Self {
+            rebuild_watchdog_interval: Duration::from_millis(25),
+            rebuild_stale_after: Duration::from_millis(100),
+            repair_watchdog_interval: Duration::from_millis(25),
+            repair_stale_after: Duration::from_millis(100),
+            repair_restart_backoff_initial: Duration::from_millis(25),
+            repair_restart_backoff_max: Duration::from_millis(100),
+        }
+    }
+
+    #[cfg(test)]
+    fn submission_recovery_for_tests() -> Self {
+        Self {
+            rebuild_watchdog_interval: Duration::from_secs(5),
+            rebuild_stale_after: Duration::from_secs(5),
+            repair_watchdog_interval: Duration::from_millis(25),
+            repair_stale_after: Duration::from_millis(100),
+            repair_restart_backoff_initial: Duration::from_millis(25),
+            repair_restart_backoff_max: Duration::from_millis(100),
+        }
+    }
+
+    #[cfg(test)]
+    fn repair_fast_for_tests() -> Self {
+        Self {
+            rebuild_watchdog_interval: Duration::from_millis(25),
+            rebuild_stale_after: Duration::from_millis(100),
+            repair_watchdog_interval: Duration::from_millis(25),
+            repair_stale_after: Duration::from_millis(100),
+            repair_restart_backoff_initial: Duration::from_millis(25),
+            repair_restart_backoff_max: Duration::from_millis(100),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+struct RuntimeTestHooks {
+    rebuild_should_panic: std::sync::atomic::AtomicBool,
+    rebuild_block_for: Mutex<Option<Duration>>,
+    repair_should_panic: std::sync::atomic::AtomicBool,
+    repair_block_for: Mutex<Option<Duration>>,
+}
+
+#[cfg(test)]
+impl Default for RuntimeTestHooks {
+    fn default() -> Self {
+        Self {
+            rebuild_should_panic: std::sync::atomic::AtomicBool::new(false),
+            rebuild_block_for: Mutex::new(None),
+            repair_should_panic: std::sync::atomic::AtomicBool::new(false),
+            repair_block_for: Mutex::new(None),
+        }
+    }
+}
+
+#[cfg(test)]
+impl RuntimeTestHooks {
+    fn trigger_rebuild_panic(&self) {
+        self.rebuild_should_panic
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn maybe_panic_rebuild(&self) {
+        if self
+            .rebuild_should_panic
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("rebuild worker panic requested by test hook");
+        }
+    }
+
+    fn block_rebuild_for(&self, duration: Duration) {
+        *self
+            .rebuild_block_for
+            .lock()
+            .expect("runtime test hook lock poisoned") = Some(duration);
+    }
+
+    fn block_next_rebuild_for(&self, duration: Duration) {
+        self.block_rebuild_for(duration);
+    }
+
+    fn maybe_block_rebuild(&self) {
+        let duration = self
+            .rebuild_block_for
+            .lock()
+            .expect("runtime test hook lock poisoned")
+            .take();
+        if let Some(duration) = duration {
+            thread::sleep(duration);
+        }
+    }
+
+    fn trigger_repair_panic(&self) {
+        self.repair_should_panic
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn maybe_panic_repair(&self) {
+        if self
+            .repair_should_panic
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("repair worker panic requested by test hook");
+        }
+    }
+
+    fn block_next_repair_for(&self, duration: Duration) {
+        *self
+            .repair_block_for
+            .lock()
+            .expect("runtime test hook lock poisoned") = Some(duration);
+    }
+
+    fn maybe_block_repair(&self) {
+        let duration = self
+            .repair_block_for
+            .lock()
+            .expect("runtime test hook lock poisoned")
+            .take();
+        if let Some(duration) = duration {
+            thread::sleep(duration);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct RuntimeState {
+    rebuild_workers: Mutex<HashMap<i64, Arc<RebuildWorkerHeartbeat>>>,
+    repair_worker: Mutex<Option<Arc<RepairWorkerHeartbeat>>>,
+    next_repair_generation: AtomicU64,
+}
+
+impl RuntimeState {
+    fn register_rebuild_worker(&self, job_id: i64) -> Arc<RebuildWorkerHeartbeat> {
+        let heartbeat = Arc::new(RebuildWorkerHeartbeat::new());
+        self.rebuild_workers
+            .lock()
+            .expect("runtime rebuild registry lock poisoned")
+            .insert(job_id, Arc::clone(&heartbeat));
+        heartbeat
+    }
+
+    fn rebuild_worker(&self, job_id: i64) -> Option<Arc<RebuildWorkerHeartbeat>> {
+        self.rebuild_workers
+            .lock()
+            .expect("runtime rebuild registry lock poisoned")
+            .get(&job_id)
+            .cloned()
+    }
+
+    fn unregister_rebuild_worker(&self, job_id: i64) {
+        self.rebuild_workers
+            .lock()
+            .expect("runtime rebuild registry lock poisoned")
+            .remove(&job_id);
+    }
+
+    fn register_repair_worker(&self) -> Arc<RepairWorkerHeartbeat> {
+        let generation = self.next_repair_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let heartbeat = Arc::new(RepairWorkerHeartbeat::new(generation));
+        *self
+            .repair_worker
+            .lock()
+            .expect("runtime repair registry lock poisoned") = Some(Arc::clone(&heartbeat));
+        heartbeat
+    }
+
+    fn current_repair_generation(&self) -> u64 {
+        self.repair_worker
+            .lock()
+            .expect("runtime repair registry lock poisoned")
+            .as_ref()
+            .map(|heartbeat| heartbeat.generation)
+            .unwrap_or(0)
+    }
+
+    fn repair_worker(&self) -> Option<Arc<RepairWorkerHeartbeat>> {
+        self.repair_worker
+            .lock()
+            .expect("runtime repair registry lock poisoned")
+            .as_ref()
+            .cloned()
+    }
+}
+
+#[derive(Debug)]
+struct RebuildWorkerHeartbeat {
+    last_seen: Mutex<Instant>,
+}
+
+impl RebuildWorkerHeartbeat {
+    fn new() -> Self {
+        Self {
+            last_seen: Mutex::new(Instant::now()),
+        }
+    }
+
+    fn touch(&self) {
+        *self
+            .last_seen
+            .lock()
+            .expect("rebuild heartbeat lock poisoned") = Instant::now();
+    }
+
+    fn age(&self) -> Duration {
+        self.last_seen
+            .lock()
+            .expect("rebuild heartbeat lock poisoned")
+            .elapsed()
+    }
+}
+
+#[derive(Debug)]
+struct RepairWorkerHeartbeat {
+    generation: u64,
+    last_seen: Mutex<Instant>,
+}
+
+impl RepairWorkerHeartbeat {
+    fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            last_seen: Mutex::new(Instant::now()),
+        }
+    }
+
+    fn touch(&self) {
+        *self
+            .last_seen
+            .lock()
+            .expect("repair heartbeat lock poisoned") = Instant::now();
+    }
+
+    fn age(&self) -> Duration {
+        self.last_seen
+            .lock()
+            .expect("repair heartbeat lock poisoned")
+            .elapsed()
+    }
+}
+
+#[derive(Debug)]
+struct RepairRestartBackoff {
+    initial: Duration,
+    max: Duration,
+    current: Duration,
+}
+
+impl RepairRestartBackoff {
+    fn new(initial: Duration, max: Duration) -> Self {
+        Self {
+            initial,
+            max,
+            current: initial,
+        }
+    }
+
+    fn next_delay(&mut self) -> Duration {
+        let delay = self.current;
+        self.current = self.current.saturating_mul(2).min(self.max);
+        delay
+    }
+
+    fn reset(&mut self) {
+        self.current = self.initial;
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AppState {
     services: Arc<Mutex<AppServices>>,
     embedding_provider: StubEmbeddingProvider,
     vector_index: Arc<Mutex<InMemoryVectorIndex>>,
     repair_db_path: String,
+    runtime: Arc<RuntimeState>,
+    runtime_config: RuntimeConfig,
+    #[cfg(test)]
+    test_hooks: Arc<RuntimeTestHooks>,
 }
 
 #[derive(Debug)]
@@ -85,6 +400,8 @@ struct ServerRepairTaskExecutor {
     db_path: String,
     embedding_provider: StubEmbeddingProvider,
     vector_index: Arc<Mutex<InMemoryVectorIndex>>,
+    #[cfg(test)]
+    test_hooks: Arc<RuntimeTestHooks>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,11 +450,30 @@ impl std::error::Error for AppStateError {}
 
 impl AppState {
     pub fn new() -> Result<Self, String> {
-        let db_path = std::env::var("SEAHORSE_DB_PATH").unwrap_or_else(|_| DEFAULT_DB_PATH.to_owned());
-        Self::new_with_db_path(&db_path)
+        let db_path =
+            std::env::var("SEAHORSE_DB_PATH").unwrap_or_else(|_| DEFAULT_DB_PATH.to_owned());
+        Self::new_with_runtime_config(
+            &db_path,
+            RuntimeConfig::production(),
+            #[cfg(test)]
+            Arc::new(RuntimeTestHooks::default()),
+        )
     }
 
     pub(crate) fn new_with_db_path(db_path: &str) -> Result<Self, String> {
+        Self::new_with_runtime_config(
+            db_path,
+            RuntimeConfig::production(),
+            #[cfg(test)]
+            Arc::new(RuntimeTestHooks::default()),
+        )
+    }
+
+    fn new_with_runtime_config(
+        db_path: &str,
+        runtime_config: RuntimeConfig,
+        #[cfg(test)] test_hooks: Arc<RuntimeTestHooks>,
+    ) -> Result<Self, String> {
         let embedding_provider = StubEmbeddingProvider::from_dimension(DEFAULT_EMBEDDING_DIMENSION)
             .map_err(|error| format!("failed to initialize embedding provider: {error}"))?;
         let (mut repository, bootstrap_chunks) = open_repository(db_path)?;
@@ -178,11 +514,30 @@ impl AppState {
             embedding_provider,
             vector_index: Arc::new(Mutex::new(vector_index)),
             repair_db_path: db_path.to_owned(),
+            runtime: Arc::new(RuntimeState::default()),
+            runtime_config,
+            #[cfg(test)]
+            test_hooks,
         };
         state.recover_active_rebuild_job()?;
         state.spawn_repair_worker()?;
+        state.spawn_runtime_watchdog()?;
 
         Ok(state)
+    }
+
+    #[cfg(test)]
+    fn new_with_runtime_for_tests(
+        db_path: &str,
+        runtime_config: RuntimeConfig,
+        test_hooks: Arc<RuntimeTestHooks>,
+    ) -> Result<Self, String> {
+        Self::new_with_runtime_config(db_path, runtime_config, test_hooks)
+    }
+
+    #[cfg(test)]
+    fn current_repair_generation_for_tests(&self) -> u64 {
+        self.runtime.current_repair_generation()
     }
 
     pub fn ingest(&self, request: CoreIngestRequest) -> Result<CoreIngestResult, AppStateError> {
@@ -193,12 +548,12 @@ impl AppState {
                 message: "application state lock poisoned",
             })?;
         let provider = self.embedding_provider.clone();
-        let mut vector_index = self
-            .vector_index
-            .lock()
-            .map_err(|_| AppStateError::Unavailable {
-                message: "vector index lock poisoned",
-            })?;
+        let mut vector_index =
+            self.vector_index
+                .lock()
+                .map_err(|_| AppStateError::Unavailable {
+                    message: "vector index lock poisoned",
+                })?;
         let mut pipeline =
             IngestPipeline::new(&mut services.repository, &provider, &mut *vector_index);
 
@@ -233,12 +588,12 @@ impl AppState {
             .map_err(|_| AppStateError::Unavailable {
                 message: "application state lock poisoned",
             })?;
-        let mut vector_index = self
-            .vector_index
-            .lock()
-            .map_err(|_| AppStateError::Unavailable {
-                message: "vector index lock poisoned",
-            })?;
+        let mut vector_index =
+            self.vector_index
+                .lock()
+                .map_err(|_| AppStateError::Unavailable {
+                    message: "vector index lock poisoned",
+                })?;
         let mut pipeline = ForgetPipeline::new(&mut services.repository, &mut *vector_index);
 
         pipeline.forget(request).map_err(AppStateError::Forget)
@@ -249,6 +604,8 @@ impl AppState {
         request: CoreRebuildRequest,
         force: bool,
     ) -> Result<MaintenanceJob, AppStateError> {
+        self.recover_stale_active_rebuild_job(&request.namespace)?;
+
         let job = {
             let mut services = self
                 .services
@@ -363,10 +720,24 @@ impl AppState {
         let db_path = self.repair_db_path.clone();
         let embedding_provider = self.embedding_provider.clone();
         let vector_index = Arc::clone(&self.vector_index);
+        let heartbeat = self.runtime.register_repair_worker();
+        let runtime = Arc::clone(&self.runtime);
+        let runtime_config = self.runtime_config.clone();
+        #[cfg(test)]
+        let test_hooks = Arc::clone(&self.test_hooks);
         thread::Builder::new()
             .name("seahorse-repair-default".to_owned())
             .spawn(move || {
-                run_repair_worker_loop(db_path, embedding_provider, vector_index);
+                run_repair_worker_loop(
+                    db_path,
+                    embedding_provider,
+                    vector_index,
+                    runtime,
+                    heartbeat,
+                    runtime_config,
+                    #[cfg(test)]
+                    test_hooks,
+                );
             })
             .map(|_| ())
             .map_err(|error| format!("failed to spawn repair worker: {error}"))
@@ -374,10 +745,9 @@ impl AppState {
 
     fn recover_active_rebuild_job(&self) -> Result<(), String> {
         let active_job = {
-            let mut services = self
-                .services
-                .lock()
-                .map_err(|_| "application state lock poisoned during startup recovery".to_owned())?;
+            let mut services = self.services.lock().map_err(|_| {
+                "application state lock poisoned during startup recovery".to_owned()
+            })?;
             let active_jobs = services
                 .repository
                 .list_active_maintenance_jobs("rebuild", DEFAULT_NAMESPACE)
@@ -426,15 +796,35 @@ impl AppState {
         request: CoreRebuildRequest,
     ) -> std::io::Result<()> {
         let state = self.clone();
+        let namespace = request.namespace.clone();
+        let heartbeat = self.runtime.register_rebuild_worker(job_id);
         thread::Builder::new()
             .name(format!("seahorse-rebuild-{job_id}"))
             .spawn(move || {
-                state.run_rebuild_job(job_id, request);
+                heartbeat.touch();
+                if let Err(payload) =
+                    panic::catch_unwind(AssertUnwindSafe(|| state.run_rebuild_job(job_id, request)))
+                {
+                    let error_message = format!(
+                        "rebuild worker panic: {}",
+                        panic_payload_to_string(payload.as_ref())
+                    );
+                    let _ = state.fail_rebuild_submission(job_id, &namespace, &error_message);
+                }
+                state.runtime.unregister_rebuild_worker(job_id);
             })
             .map(|_| ())
     }
 
     fn run_rebuild_job(&self, job_id: i64, request: CoreRebuildRequest) {
+        #[cfg(test)]
+        {
+            self.test_hooks.maybe_panic_rebuild();
+            self.test_hooks.maybe_block_rebuild();
+        }
+
+        self.touch_rebuild_worker(job_id);
+
         let work = match self.prepare_rebuild_job(job_id, &request) {
             Ok(Some(work)) => work,
             Ok(None) => return,
@@ -444,6 +834,8 @@ impl AppState {
                 return;
             }
         };
+
+        self.touch_rebuild_worker(job_id);
 
         let entries = match build_rebuild_entries(&work.provider, &work.chunks) {
             Ok(entries) => entries,
@@ -460,6 +852,117 @@ impl AppState {
         }
     }
 
+    fn spawn_runtime_watchdog(&self) -> Result<(), String> {
+        let state = self.clone();
+        thread::Builder::new()
+            .name("seahorse-runtime-watchdog".to_owned())
+            .spawn(move || state.run_runtime_watchdog_loop())
+            .map(|_| ())
+            .map_err(|error| format!("failed to spawn runtime watchdog: {error}"))
+    }
+
+    fn run_runtime_watchdog_loop(&self) {
+        let interval = self
+            .runtime_config
+            .rebuild_watchdog_interval
+            .min(self.runtime_config.repair_watchdog_interval);
+        loop {
+            thread::sleep(interval);
+            self.recover_stale_rebuild_jobs();
+            self.recover_stale_repair_worker();
+        }
+    }
+
+    fn recover_stale_active_rebuild_job(&self, namespace: &str) -> Result<(), AppStateError> {
+        let active_job = {
+            let services = self
+                .services
+                .lock()
+                .map_err(|_| AppStateError::Unavailable {
+                    message: "application state lock poisoned",
+                })?;
+            services
+                .repository
+                .find_active_maintenance_job("rebuild", namespace)
+                .map_err(AppStateError::Storage)?
+        };
+
+        let Some(active_job) = active_job else {
+            return Ok(());
+        };
+
+        let Some(error_message) = self.rebuild_stale_reason(active_job.id) else {
+            return Ok(());
+        };
+
+        self.fail_rebuild_submission(active_job.id, namespace, &error_message)?;
+        self.runtime.unregister_rebuild_worker(active_job.id);
+        Ok(())
+    }
+
+    fn recover_stale_rebuild_jobs(&self) {
+        let active_jobs = {
+            let services = match self.services.lock() {
+                Ok(services) => services,
+                Err(_) => return,
+            };
+            match services
+                .repository
+                .list_active_maintenance_jobs("rebuild", DEFAULT_NAMESPACE)
+            {
+                Ok(jobs) => jobs,
+                Err(_) => return,
+            }
+        };
+
+        for job in active_jobs {
+            if let Some(error_message) = self.rebuild_stale_reason(job.id) {
+                let _ = self.fail_rebuild_submission(job.id, &job.namespace, &error_message);
+                self.runtime.unregister_rebuild_worker(job.id);
+            }
+        }
+    }
+
+    fn touch_rebuild_worker(&self, job_id: i64) {
+        if let Some(heartbeat) = self.runtime.rebuild_worker(job_id) {
+            heartbeat.touch();
+        }
+    }
+
+    fn rebuild_stale_reason(&self, job_id: i64) -> Option<String> {
+        let Some(heartbeat) = self.runtime.rebuild_worker(job_id) else {
+            return Some("rebuild worker missing from runtime registry".to_owned());
+        };
+
+        if heartbeat.age() > self.runtime_config.rebuild_stale_after {
+            return Some(format!(
+                "rebuild worker watchdog timeout after {:?}",
+                self.runtime_config.rebuild_stale_after
+            ));
+        }
+
+        None
+    }
+
+    fn recover_stale_repair_worker(&self) {
+        let Some(heartbeat) = self.runtime.repair_worker() else {
+            let _ = self.spawn_repair_worker();
+            return;
+        };
+
+        if heartbeat.age() <= self.runtime_config.repair_stale_after {
+            return;
+        }
+
+        let _ = recover_running_repair_tasks_runtime(
+            &self.repair_db_path,
+            DEFAULT_NAMESPACE,
+            REPAIR_WORKER_CONFIG.max_retries,
+            "repair worker watchdog recovered stalled task",
+        );
+        let _ = self.spawn_repair_worker();
+    }
+
     fn prepare_rebuild_job(
         &self,
         job_id: i64,
@@ -472,7 +975,7 @@ impl AppState {
                 message: "application state lock poisoned",
             })?;
         let job = load_job(&services.repository, job_id)?;
-        if job.status == "cancelled" {
+        if job.status != "queued" && job.status != "running" {
             return Ok(None);
         }
         let provider = self.embedding_provider.clone();
@@ -518,19 +1021,19 @@ impl AppState {
                     message: "application state lock poisoned",
                 })?;
             let job = load_job(&services.repository, job_id)?;
-            if job.status == "cancelled" {
+            if job.status != "running" {
                 self.restore_index_state_after_cancel(&mut services.repository, &work.namespace)?;
                 return Ok(());
             }
         }
 
         {
-            let mut vector_index = self
-                .vector_index
-                .lock()
-                .map_err(|_| AppStateError::Unavailable {
-                    message: "vector index lock poisoned",
-                })?;
+            let mut vector_index =
+                self.vector_index
+                    .lock()
+                    .map_err(|_| AppStateError::Unavailable {
+                        message: "vector index lock poisoned",
+                    })?;
             match work.scope {
                 RebuildScope::All => vector_index
                     .rebuild(entries)
@@ -553,7 +1056,11 @@ impl AppState {
             .map_err(|_| AppStateError::Unavailable {
                 message: "application state lock poisoned",
             })?;
-        let chunk_ids = work.chunks.iter().map(|chunk| chunk.chunk_id).collect::<Vec<_>>();
+        let chunk_ids = work
+            .chunks
+            .iter()
+            .map(|chunk| chunk.chunk_id)
+            .collect::<Vec<_>>();
         services
             .repository
             .mark_chunks_ready(&work.namespace, &chunk_ids)
@@ -562,10 +1069,11 @@ impl AppState {
             .repository
             .refresh_file_statuses(&work.namespace)
             .map_err(AppStateError::Storage)?;
-        sync_runtime_schema_meta(&mut services.repository, &work.provider, "ready")
-            .map_err(|_| AppStateError::Unavailable {
+        sync_runtime_schema_meta(&mut services.repository, &work.provider, "ready").map_err(
+            |_| AppStateError::Unavailable {
                 message: "failed to persist ready rebuild state",
-            })?;
+            },
+        )?;
 
         let progress = format!("{0}/{0}", chunk_ids.len());
         let result_summary = format!(
@@ -606,8 +1114,8 @@ impl AppState {
             return Ok(());
         }
 
-        let fallback_index_state = derive_index_state(&services.repository)
-            .map_err(AppStateError::Storage)?;
+        let fallback_index_state =
+            derive_index_state(&services.repository).map_err(AppStateError::Storage)?;
         services
             .repository
             .finish_maintenance_job(job_id, "failed", None, None, Some(error_message))
@@ -641,7 +1149,8 @@ impl AppState {
             return Ok(());
         }
 
-        let fallback_index_state = derive_index_state(repository).map_err(AppStateError::Storage)?;
+        let fallback_index_state =
+            derive_index_state(repository).map_err(AppStateError::Storage)?;
         repository
             .set_schema_meta_value("index_state", &fallback_index_state)
             .map_err(AppStateError::Storage)?;
@@ -702,12 +1211,13 @@ impl ServerRepairTaskExecutor {
             let vector = self
                 .embedding_provider
                 .embed(&record.chunk_text)
-                .map_err(|error| format!("failed to embed chunk {} for repair: {error}", record.chunk_id))?;
-            entries.push(IndexEntry::new(
-                record.chunk_id,
-                record.namespace,
-                vector,
-            ));
+                .map_err(|error| {
+                    format!(
+                        "failed to embed chunk {} for repair: {error}",
+                        record.chunk_id
+                    )
+                })?;
+            entries.push(IndexEntry::new(record.chunk_id, record.namespace, vector));
         }
 
         {
@@ -722,7 +1232,12 @@ impl ServerRepairTaskExecutor {
 
         repository
             .mark_chunks_ready(&task.namespace, &payload.chunk_ids)
-            .map_err(|error| format!("failed to mark chunks ready for repair task {}: {error}", task.id))?;
+            .map_err(|error| {
+                format!(
+                    "failed to mark chunks ready for repair task {}: {error}",
+                    task.id
+                )
+            })?;
         repository
             .refresh_file_statuses(&task.namespace)
             .map_err(|error| {
@@ -771,6 +1286,12 @@ impl ServerRepairTaskExecutor {
 
 impl RepairTaskExecutor for ServerRepairTaskExecutor {
     fn execute(&mut self, task: &RepairTask) -> Result<(), String> {
+        #[cfg(test)]
+        {
+            self.test_hooks.maybe_panic_repair();
+            self.test_hooks.maybe_block_repair();
+        }
+
         match task.task_type.as_str() {
             "index_insert" => {
                 let payload = parse_repair_payload::<IndexInsertRepairPayload>(task)?;
@@ -789,40 +1310,127 @@ fn run_repair_worker_loop(
     db_path: String,
     embedding_provider: StubEmbeddingProvider,
     vector_index: Arc<Mutex<InMemoryVectorIndex>>,
+    runtime: Arc<RuntimeState>,
+    heartbeat: Arc<RepairWorkerHeartbeat>,
+    runtime_config: RuntimeConfig,
+    #[cfg(test)] test_hooks: Arc<RuntimeTestHooks>,
 ) {
+    let mut current_heartbeat = heartbeat;
+    let mut restart_backoff = RepairRestartBackoff::new(
+        runtime_config.repair_restart_backoff_initial,
+        runtime_config.repair_restart_backoff_max,
+    );
     loop {
-        let mut repository = match open_runtime_repository(&db_path) {
-            Ok(repository) => repository,
-            Err(_) => {
-                thread::sleep(REPAIR_POLL_INTERVAL);
-                continue;
-            }
-        };
-        let mut executor = ServerRepairTaskExecutor {
-            db_path: db_path.clone(),
-            embedding_provider: embedding_provider.clone(),
-            vector_index: Arc::clone(&vector_index),
-        };
-        let mut worker = match RepairWorker::new(&mut repository, &mut executor, REPAIR_WORKER_CONFIG)
-        {
-            Ok(worker) => worker,
-            Err(_) => return,
+        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            run_repair_worker_generation(
+                &db_path,
+                &embedding_provider,
+                &vector_index,
+                Arc::clone(&current_heartbeat),
+                runtime_config
+                    .repair_watchdog_interval
+                    .min(runtime_config.repair_stale_after),
+                &mut restart_backoff,
+                #[cfg(test)]
+                Arc::clone(&test_hooks),
+            )
+        }));
+
+        let recovery_error = match outcome {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(payload) => Some(format!(
+                "repair worker panic recovered by supervisor: {}",
+                panic_payload_to_string(payload.as_ref())
+            )),
         };
 
+        if let Some(error_message) = recovery_error {
+            let _ = recover_running_repair_tasks_runtime(
+                &db_path,
+                DEFAULT_NAMESPACE,
+                REPAIR_WORKER_CONFIG.max_retries,
+                &error_message,
+            );
+            thread::sleep(restart_backoff.next_delay());
+            current_heartbeat = runtime.register_repair_worker();
+        }
+    }
+}
+
+fn run_repair_worker_generation(
+    db_path: &str,
+    embedding_provider: &StubEmbeddingProvider,
+    vector_index: &Arc<Mutex<InMemoryVectorIndex>>,
+    heartbeat: Arc<RepairWorkerHeartbeat>,
+    idle_heartbeat_interval: Duration,
+    restart_backoff: &mut RepairRestartBackoff,
+    #[cfg(test)] test_hooks: Arc<RuntimeTestHooks>,
+) -> Result<(), String> {
+    loop {
+        heartbeat.touch();
+        let mut repository = open_runtime_repository(db_path)?;
+        let mut executor = ServerRepairTaskExecutor {
+            db_path: db_path.to_owned(),
+            embedding_provider: embedding_provider.clone(),
+            vector_index: Arc::clone(vector_index),
+            #[cfg(test)]
+            test_hooks: Arc::clone(&test_hooks),
+        };
+        let mut worker =
+            match RepairWorker::new(&mut repository, &mut executor, REPAIR_WORKER_CONFIG) {
+                Ok(worker) => worker,
+                Err(error) => return Err(format!("failed to initialize repair worker: {error}")),
+            };
+
         loop {
+            heartbeat.touch();
             match worker.run_once(DEFAULT_NAMESPACE) {
                 Ok(result) => {
+                    restart_backoff.reset();
+                    heartbeat.touch();
                     if result.scanned == 0 {
-                        thread::sleep(REPAIR_POLL_INTERVAL);
+                        sleep_with_repair_heartbeat(
+                            heartbeat.as_ref(),
+                            REPAIR_POLL_INTERVAL,
+                            idle_heartbeat_interval,
+                        );
                     }
                 }
-                Err(_) => {
-                    thread::sleep(REPAIR_POLL_INTERVAL);
-                    break;
+                Err(error) => {
+                    heartbeat.touch();
+                    return Err(format!("repair worker run_once failed: {error}"));
                 }
             }
         }
     }
+}
+
+fn sleep_with_repair_heartbeat(
+    heartbeat: &RepairWorkerHeartbeat,
+    total_sleep: Duration,
+    step: Duration,
+) {
+    let mut slept = Duration::ZERO;
+    while slept < total_sleep {
+        let remaining = total_sleep.saturating_sub(slept);
+        let slice = remaining.min(step);
+        thread::sleep(slice);
+        heartbeat.touch();
+        slept += slice;
+    }
+}
+
+fn recover_running_repair_tasks_runtime(
+    db_path: &str,
+    namespace: &str,
+    max_retry_count: u32,
+    last_error: &str,
+) -> Result<usize, String> {
+    let mut repository = open_runtime_repository(db_path)?;
+    repository
+        .recover_running_repair_tasks(namespace, max_retry_count, last_error)
+        .map_err(|error| format!("failed to recover running repair tasks: {error}"))
 }
 
 fn open_repository(path: &str) -> Result<(SqliteRepository, Vec<BootstrapChunk>), String> {
@@ -831,7 +1439,8 @@ fn open_repository(path: &str) -> Result<(SqliteRepository, Vec<BootstrapChunk>)
             .map_err(|error| format!("failed to open sqlite memory database: {error}"))?
     } else {
         ensure_parent_dir(path)?;
-        Connection::open(path).map_err(|error| format!("failed to open sqlite database: {error}"))?
+        Connection::open(path)
+            .map_err(|error| format!("failed to open sqlite database: {error}"))?
     };
 
     apply_sqlite_migrations(&connection)
@@ -849,7 +1458,8 @@ fn open_runtime_repository(path: &str) -> Result<SqliteRepository, String> {
             .map_err(|error| format!("failed to open sqlite memory database: {error}"))?
     } else {
         ensure_parent_dir(path)?;
-        Connection::open(path).map_err(|error| format!("failed to open sqlite database: {error}"))?
+        Connection::open(path)
+            .map_err(|error| format!("failed to open sqlite database: {error}"))?
     };
 
     apply_sqlite_migrations(&connection)
@@ -879,8 +1489,12 @@ fn ensure_parent_dir(path: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("failed to create database directory {}: {error}", parent.display()))
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "failed to create database directory {}: {error}",
+            parent.display()
+        )
+    })
 }
 
 fn load_bootstrap_chunks(connection: &Connection) -> Result<Vec<BootstrapChunk>, String> {
@@ -921,7 +1535,12 @@ fn build_bootstrap_entries(
     for chunk in chunks {
         let vector = embedding_provider
             .embed(&chunk.chunk_text)
-            .map_err(|error| format!("failed to embed bootstrap chunk {}: {error}", chunk.chunk_id))?;
+            .map_err(|error| {
+                format!(
+                    "failed to embed bootstrap chunk {}: {error}",
+                    chunk.chunk_id
+                )
+            })?;
         entries.push(IndexEntry::new(
             chunk.chunk_id,
             chunk.namespace.clone(),
@@ -979,7 +1598,9 @@ fn current_index_state(repository: &SqliteRepository) -> Result<String, AppState
 
 fn derive_index_state(repository: &SqliteRepository) -> Result<String, StorageError> {
     if repository.has_repair_backlog(DEFAULT_NAMESPACE)?
-        || !repository.list_missing_index_chunks(DEFAULT_NAMESPACE)?.is_empty()
+        || !repository
+            .list_missing_index_chunks(DEFAULT_NAMESPACE)?
+            .is_empty()
     {
         Ok("degraded".to_owned())
     } else {
@@ -1019,8 +1640,11 @@ fn load_job(repository: &SqliteRepository, job_id: i64) -> Result<MaintenanceJob
 
 fn rebuild_request_from_job(job: &MaintenanceJob) -> Result<CoreRebuildRequest, String> {
     let payload = match job.payload_json.as_deref() {
-        Some(payload_json) => serde_json::from_str::<RebuildJobPayload>(payload_json)
-            .map_err(|error| format!("invalid rebuild job payload for job_id {}: {error}", job.id))?,
+        Some(payload_json) => {
+            serde_json::from_str::<RebuildJobPayload>(payload_json).map_err(|error| {
+                format!("invalid rebuild job payload for job_id {}: {error}", job.id)
+            })?
+        }
         None => RebuildJobPayload { scope: None },
     };
 
@@ -1039,4 +1663,378 @@ fn rebuild_request_from_job(job: &MaintenanceJob) -> Result<CoreRebuildRequest, 
         namespace: job.namespace.clone(),
         scope,
     })
+}
+
+fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        return (*message).to_owned();
+    }
+
+    if let Some(message) = payload.downcast_ref::<String>() {
+        return message.clone();
+    }
+
+    "unknown panic payload".to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use seahorse_core::IngestRequest as CoreIngestRequest;
+
+    use super::{
+        open_runtime_repository, AppState, MaintenanceJob, RepairRestartBackoff, RuntimeConfig,
+        RuntimeTestHooks, DEFAULT_NAMESPACE,
+    };
+    use seahorse_core::RebuildScope;
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+    const JOB_POLL_ATTEMPTS: usize = 500;
+    const JOB_POLL_SLEEP_MS: u64 = 20;
+
+    #[test]
+    fn rebuild_worker_panic_marks_job_failed() {
+        let db_path = unique_db_path("rebuild-worker-panic");
+        let hooks = Arc::new(RuntimeTestHooks::default());
+        hooks.trigger_rebuild_panic();
+
+        let state = AppState::new_with_runtime_for_tests(
+            db_path
+                .to_str()
+                .expect("temp db path must be valid unicode"),
+            RuntimeConfig::fast_for_tests(),
+            Arc::clone(&hooks),
+        )
+        .expect("create app state");
+        seed_rebuild_dataset(&state, "rebuild-worker-panic");
+
+        let job = state
+            .rebuild(
+                seahorse_core::RebuildRequest {
+                    namespace: DEFAULT_NAMESPACE.to_owned(),
+                    scope: RebuildScope::All,
+                },
+                false,
+            )
+            .expect("submit rebuild");
+        let terminal = wait_for_job(&state, job.id);
+
+        assert_eq!(terminal.status, "failed");
+        assert!(terminal
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("panic"));
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[test]
+    fn rebuild_watchdog_marks_stalled_job_failed() {
+        let db_path = unique_db_path("rebuild-watchdog-timeout");
+        let hooks = Arc::new(RuntimeTestHooks::default());
+        hooks.block_rebuild_for(Duration::from_millis(250));
+
+        let state = AppState::new_with_runtime_for_tests(
+            db_path
+                .to_str()
+                .expect("temp db path must be valid unicode"),
+            RuntimeConfig::fast_for_tests(),
+            Arc::clone(&hooks),
+        )
+        .expect("create app state");
+        seed_rebuild_dataset(&state, "rebuild-watchdog-timeout");
+
+        let job = state
+            .rebuild(
+                seahorse_core::RebuildRequest {
+                    namespace: DEFAULT_NAMESPACE.to_owned(),
+                    scope: RebuildScope::All,
+                },
+                false,
+            )
+            .expect("submit rebuild");
+        let terminal = wait_for_job(&state, job.id);
+
+        assert_eq!(terminal.status, "failed");
+        let error_message = terminal.error_message.as_deref().unwrap_or_default();
+        assert!(error_message.contains("watchdog") || error_message.contains("runtime registry"));
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[test]
+    fn rebuild_submission_recovers_orphaned_active_job_immediately() {
+        let db_path = unique_db_path("rebuild-submit-recovery");
+        let hooks = Arc::new(RuntimeTestHooks::default());
+        hooks.block_next_rebuild_for(Duration::from_millis(250));
+
+        let state = AppState::new_with_runtime_for_tests(
+            db_path
+                .to_str()
+                .expect("temp db path must be valid unicode"),
+            RuntimeConfig::submission_recovery_for_tests(),
+            Arc::clone(&hooks),
+        )
+        .expect("create app state");
+        seed_rebuild_dataset(&state, "rebuild-submit-recovery");
+
+        let first_job = state
+            .rebuild(
+                seahorse_core::RebuildRequest {
+                    namespace: DEFAULT_NAMESPACE.to_owned(),
+                    scope: RebuildScope::All,
+                },
+                false,
+            )
+            .expect("submit first rebuild");
+        state.runtime.unregister_rebuild_worker(first_job.id);
+
+        let second_job = state
+            .rebuild(
+                seahorse_core::RebuildRequest {
+                    namespace: DEFAULT_NAMESPACE.to_owned(),
+                    scope: RebuildScope::All,
+                },
+                false,
+            )
+            .expect("submit second rebuild");
+
+        assert_ne!(first_job.id, second_job.id);
+
+        let first_terminal = wait_for_job(&state, first_job.id);
+        assert_eq!(first_terminal.status, "failed");
+        assert!(first_terminal
+            .error_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("runtime registry"));
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[test]
+    fn healthy_idle_repair_worker_does_not_restart() {
+        let db_path = unique_db_path("repair-idle-heartbeat");
+        let hooks = Arc::new(RuntimeTestHooks::default());
+
+        let state = AppState::new_with_runtime_for_tests(
+            db_path
+                .to_str()
+                .expect("temp db path must be valid unicode"),
+            RuntimeConfig::repair_fast_for_tests(),
+            Arc::clone(&hooks),
+        )
+        .expect("create app state");
+
+        let initial_generation = state.current_repair_generation_for_tests();
+        thread::sleep(Duration::from_millis(250));
+        let current_generation = state.current_repair_generation_for_tests();
+
+        assert_eq!(current_generation, initial_generation);
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[test]
+    fn repair_worker_panic_recovers_running_task_and_restarts() {
+        let db_path = unique_db_path("repair-panic-restart");
+        let hooks = Arc::new(RuntimeTestHooks::default());
+        hooks.trigger_repair_panic();
+
+        let state = AppState::new_with_runtime_for_tests(
+            db_path
+                .to_str()
+                .expect("temp db path must be valid unicode"),
+            RuntimeConfig::repair_fast_for_tests(),
+            Arc::clone(&hooks),
+        )
+        .expect("create app state");
+        seed_rebuild_dataset(&state, "repair-panic-restart");
+
+        let initial_generation = state.current_repair_generation_for_tests();
+        let chunk_id = first_chunk_id(&db_path);
+        let task_id = enqueue_index_delete_repair_task(&db_path, chunk_id, "panic-repair");
+
+        let terminal_task = wait_for_repair_task_terminal(&db_path, task_id);
+        assert_ne!(terminal_task.status, "running");
+
+        let restarted_generation = wait_for_repair_generation_change(&state, initial_generation);
+        assert!(restarted_generation > initial_generation);
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[test]
+    fn repair_watchdog_recovers_stalled_task_and_restarts() {
+        let db_path = unique_db_path("repair-watchdog-stall");
+        let hooks = Arc::new(RuntimeTestHooks::default());
+        hooks.block_next_repair_for(Duration::from_millis(250));
+
+        let state = AppState::new_with_runtime_for_tests(
+            db_path
+                .to_str()
+                .expect("temp db path must be valid unicode"),
+            RuntimeConfig::repair_fast_for_tests(),
+            Arc::clone(&hooks),
+        )
+        .expect("create app state");
+        seed_rebuild_dataset(&state, "repair-watchdog-stall");
+
+        let initial_generation = state.current_repair_generation_for_tests();
+        let chunk_id = first_chunk_id(&db_path);
+        let task_id = enqueue_index_delete_repair_task(&db_path, chunk_id, "watchdog-repair");
+
+        let terminal_task = wait_for_repair_task_terminal(&db_path, task_id);
+        assert_ne!(terminal_task.status, "running");
+
+        let restarted_generation = wait_for_repair_generation_change(&state, initial_generation);
+        assert!(restarted_generation > initial_generation);
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[test]
+    fn repair_restart_backoff_grows_and_resets() {
+        let mut backoff =
+            RepairRestartBackoff::new(Duration::from_millis(10), Duration::from_millis(40));
+
+        assert_eq!(backoff.next_delay(), Duration::from_millis(10));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(20));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(40));
+        assert_eq!(backoff.next_delay(), Duration::from_millis(40));
+
+        backoff.reset();
+
+        assert_eq!(backoff.next_delay(), Duration::from_millis(10));
+    }
+
+    fn seed_rebuild_dataset(state: &AppState, prefix: &str) {
+        for index in 0..8 {
+            let mut ingest_request = CoreIngestRequest::new(heavy_rebuild_content(prefix, index));
+            ingest_request.filename = format!("{prefix}-{index}.txt");
+            state.ingest(ingest_request).expect("seed ingest");
+        }
+    }
+
+    fn wait_for_job(state: &AppState, job_id: i64) -> MaintenanceJob {
+        let mut last_status = String::new();
+        for _ in 0..JOB_POLL_ATTEMPTS {
+            let job = state.get_job(job_id).expect("load job");
+            last_status = job.status.clone();
+            if job.status == "succeeded" || job.status == "failed" || job.status == "cancelled" {
+                return job;
+            }
+
+            thread::sleep(Duration::from_millis(JOB_POLL_SLEEP_MS));
+        }
+
+        panic!("job {job_id} did not reach terminal status in time (last_status={last_status})");
+    }
+
+    fn wait_for_repair_task_terminal(db_path: &PathBuf, task_id: i64) -> seahorse_core::RepairTask {
+        let mut last_status = String::new();
+        for _ in 0..JOB_POLL_ATTEMPTS {
+            let repository = match open_runtime_repository(
+                db_path
+                    .to_str()
+                    .expect("temp db path must be valid unicode"),
+            ) {
+                Ok(repository) => repository,
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(JOB_POLL_SLEEP_MS));
+                    continue;
+                }
+            };
+            let task = repository
+                .get_repair_task(task_id)
+                .expect("load repair task")
+                .expect("repair task exists");
+            last_status = task.status.clone();
+            if task.status != "running" && task.status != "pending" {
+                return task;
+            }
+
+            thread::sleep(Duration::from_millis(JOB_POLL_SLEEP_MS));
+        }
+
+        panic!("repair task {task_id} did not reach terminal status in time (last_status={last_status})");
+    }
+
+    fn wait_for_repair_generation_change(state: &AppState, initial_generation: u64) -> u64 {
+        for _ in 0..JOB_POLL_ATTEMPTS {
+            let generation = state.current_repair_generation_for_tests();
+            if generation > initial_generation {
+                return generation;
+            }
+
+            thread::sleep(Duration::from_millis(JOB_POLL_SLEEP_MS));
+        }
+
+        panic!("repair worker generation did not advance beyond {initial_generation} in time");
+    }
+
+    fn first_chunk_id(db_path: &PathBuf) -> i64 {
+        let repository = open_runtime_repository(
+            db_path
+                .to_str()
+                .expect("temp db path must be valid unicode"),
+        )
+        .expect("open runtime repository");
+        repository
+            .list_rebuild_chunks(DEFAULT_NAMESPACE)
+            .expect("list rebuild chunks")
+            .first()
+            .expect("at least one chunk should exist")
+            .chunk_id
+    }
+
+    fn enqueue_index_delete_repair_task(db_path: &PathBuf, chunk_id: i64, error: &str) -> i64 {
+        let mut repository = open_runtime_repository(
+            db_path
+                .to_str()
+                .expect("temp db path must be valid unicode"),
+        )
+        .expect("open runtime repository");
+        repository
+            .enqueue_repair_task(
+                DEFAULT_NAMESPACE,
+                "index_delete",
+                "chunk",
+                Some(chunk_id),
+                Some(
+                    &serde_json::json!({
+                        "chunk_ids": [chunk_id],
+                        "error": error,
+                    })
+                    .to_string(),
+                ),
+            )
+            .expect("enqueue repair task")
+    }
+
+    fn unique_db_path(name: &str) -> PathBuf {
+        let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_millis();
+        std::env::temp_dir().join(format!("seahorse-state-{name}-{millis}-{counter}.db"))
+    }
+
+    fn cleanup_db_path(path: &PathBuf) {
+        let _ = std::fs::remove_file(path);
+    }
+
+    fn heavy_rebuild_content(prefix: &str, index: usize) -> String {
+        let unit = format!(
+            "{prefix}-{index} alpha beta gamma delta epsilon zeta eta theta iota kappa lambda "
+        );
+        unit.repeat(256)
+    }
 }

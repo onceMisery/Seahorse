@@ -53,6 +53,7 @@ pub struct RouteRequestMetricsSnapshot {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RequestId(pub String);
 
 pub fn current_request_id() -> Option<String> {
