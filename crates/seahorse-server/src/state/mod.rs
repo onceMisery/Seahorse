@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -114,6 +115,22 @@ pub enum AppStateError {
     NotFound { message: String },
 }
 
+impl fmt::Display for AppStateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AppStateError::Unavailable { message } => write!(f, "unavailable: {message}"),
+            AppStateError::Ingest(error) => write!(f, "ingest error: {error}"),
+            AppStateError::Forget(error) => write!(f, "forget error: {error}"),
+            AppStateError::Recall(error) => write!(f, "recall error: {error}"),
+            AppStateError::Rebuild(error) => write!(f, "rebuild error: {error}"),
+            AppStateError::Storage(error) => write!(f, "storage error: {error}"),
+            AppStateError::NotFound { message } => write!(f, "not found: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for AppStateError {}
+
 impl AppState {
     pub fn new() -> Result<Self, String> {
         let db_path = std::env::var("SEAHORSE_DB_PATH").unwrap_or_else(|_| DEFAULT_DB_PATH.to_owned());
@@ -183,7 +200,7 @@ impl AppState {
                 message: "vector index lock poisoned",
             })?;
         let mut pipeline =
-            IngestPipeline::new(&mut services.repository, &provider, &mut vector_index);
+            IngestPipeline::new(&mut services.repository, &provider, &mut *vector_index);
 
         pipeline.ingest(request).map_err(AppStateError::Ingest)
     }
@@ -202,7 +219,7 @@ impl AppState {
             .map_err(|_| AppStateError::Unavailable {
                 message: "vector index lock poisoned",
             })?;
-        let pipeline = RecallPipeline::new(&services.repository, &provider, &vector_index);
+        let pipeline = RecallPipeline::new(&services.repository, &provider, &*vector_index);
         let mut result = pipeline.recall(request).map_err(AppStateError::Recall)?;
         let index_state = current_index_state(&services.repository)?;
         apply_runtime_index_state(&mut result, index_state);
@@ -222,7 +239,7 @@ impl AppState {
             .map_err(|_| AppStateError::Unavailable {
                 message: "vector index lock poisoned",
             })?;
-        let mut pipeline = ForgetPipeline::new(&mut services.repository, &mut vector_index);
+        let mut pipeline = ForgetPipeline::new(&mut services.repository, &mut *vector_index);
 
         pipeline.forget(request).map_err(AppStateError::Forget)
     }
