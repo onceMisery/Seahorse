@@ -162,7 +162,7 @@ mod tests {
         connection
             .execute(
                 "UPDATE schema_meta SET value = ?1 WHERE key = 'schema_version'",
-                ["2"],
+                ["999"],
             )
             .expect("update schema version");
 
@@ -180,8 +180,8 @@ mod tests {
                 actual,
             } => {
                 assert_eq!(key, "schema_version");
-                assert_eq!(expected, "1");
-                assert_eq!(actual.as_deref(), Some("2"));
+                assert_eq!(expected, LATEST_SCHEMA_VERSION);
+                assert_eq!(actual.as_deref(), Some("999"));
             }
             other => panic!("unexpected error: {other}"),
         }

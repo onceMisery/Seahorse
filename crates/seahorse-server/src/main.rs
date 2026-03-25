@@ -55,7 +55,7 @@ fn build_app_with_observability(
         .route("/recall", post(handlers::recall::post_recall))
         .route("/forget", post(handlers::forget::post_forget))
         .route("/admin/rebuild", post(handlers::rebuild::post_rebuild))
-        .route("/admin/jobs/{job_id}", get(handlers::jobs::get_job))
+        .route("/admin/jobs/:job_id", get(handlers::jobs::get_job))
         .route("/stats", get(handlers::stats::get_stats))
         .route("/health", get(handlers::health::get_health));
 
@@ -106,6 +106,8 @@ mod tests {
     use crate::state::AppState;
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+    const JOB_POLL_ATTEMPTS: usize = 500;
+    const JOB_POLL_SLEEP_MS: u64 = 20;
 
     #[tokio::test]
     async fn rebuild_endpoint_creates_job_and_job_query_reaches_succeeded() {
@@ -422,7 +424,8 @@ mod tests {
     }
 
     async fn poll_job_until_terminal(app: axum::Router, job_id: &str) -> Value {
-        for _ in 0..100 {
+        let mut last_status = String::new();
+        for _ in 0..JOB_POLL_ATTEMPTS {
             let response = app
                 .clone()
                 .oneshot(
@@ -437,14 +440,17 @@ mod tests {
 
             let body = read_json_body(response).await;
             let status = body["data"]["status"].as_str().unwrap_or_default();
+            last_status = status.to_owned();
             if status == "succeeded" || status == "failed" || status == "cancelled" {
                 return body;
             }
 
-            thread::sleep(Duration::from_millis(20));
+            thread::sleep(Duration::from_millis(JOB_POLL_SLEEP_MS));
         }
 
-        panic!("job {job_id} did not reach terminal status in time");
+        panic!(
+            "job {job_id} did not reach terminal status in time (last_status={last_status})"
+        );
     }
 
     async fn read_json_body(response: axum::response::Response) -> Value {
