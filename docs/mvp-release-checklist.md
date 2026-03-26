@@ -71,28 +71,31 @@
 - 重启后 active rebuild job 可恢复
 - 多个 active rebuild job 启动恢复时仅保留最新一条
 
-## 7. 当前未完成项
+## 7. 当前代码已实现（待发布前复核）
 
-以下项未完成时，不应将当前版本定义为“可发布版 MVP 已完成”：
+- HTTP 主链路接口已实现：`POST /ingest`、`POST /recall`、`POST /forget`、`POST /admin/rebuild`、`GET /admin/jobs/{job_id}`、`GET /stats`、`GET /health`
+- `/metrics` 已实现为正式运维接口；仅当 `enable_metrics=true` 时挂载，默认配置开启，默认路径为 `/metrics`，也可由 `[observability].metrics_path` 覆盖
+- `/forget` 当前真实契约为 `mode=soft`；`hard` 不属于当前 MVP 正式发布契约
+- SQLite 备份、回滚、rebuild、health / stats / metrics 的人工巡检路径已在现有文档中定义
 
-- `repair_queue` 完整自动修复闭环
-- 结构化请求日志完整接入
-- 告警规则在监控平台落地（当前仅提供 MVP 建议阈值）
+## 8. 当前仍缺证据 / 缺验证（release blocker）
+
+以下项在证据补齐前，不应将当前版本定义为“可发布版 MVP 已完成”：
+
+- `repair_queue` 完整自动修复闭环的实现与恢复验证
+- 结构化请求日志完整接入与发布验收记录
+- 告警规则在监控平台落地并完成验证（当前仅提供 MVP 建议阈值）
 - 自动化 contract / E2E / 故障注入测试
+- 正式发布版编译 / 回归验证记录
 - `1 万 chunk` 基线性能验收
 
-## 8. 当前可接受结论
+## 9. 当前可接受结论
 
 如果以下条件成立，可接受将当前版本定义为“开发闭环版 MVP”：
 
 - 主链路可手工跑通
 - rebuild 能提交、查询、恢复
-- health / stats 可用于最小人工巡检
+- health / stats / metrics 可用于最小人工巡检
 - SQLite 备份与回滚步骤明确
 
-如果要定义为“可发布版 MVP”，则还必须补齐：
-
-1. repair worker 运行接入与恢复策略
-2. observability 收口
-3. 自动化验收
-4. 性能基线与发布检查记录
+如果要定义为“可发布版 MVP”，则必须关闭第 8 节全部 release blocker，并保留对应验证证据。

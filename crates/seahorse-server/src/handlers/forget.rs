@@ -82,8 +82,7 @@ fn build_forget_request(request: ForgetRequest) -> Result<CoreForgetRequest, Str
 
     let mode = match mode.as_deref().unwrap_or("soft") {
         "soft" => ForgetMode::Soft,
-        "hard" => ForgetMode::Hard,
-        other => return Err(format!("mode must be soft or hard; got {other}")),
+        other => return Err(format!("mode must be soft; got {other}")),
     };
 
     Ok(CoreForgetRequest {
@@ -142,5 +141,24 @@ fn map_forget_error(error: AppStateError) -> ForgetResponse {
                 false,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_forget_request;
+    use crate::api::ForgetRequest;
+
+    #[test]
+    fn rejects_hard_mode_at_http_boundary() {
+        let result = build_forget_request(ForgetRequest {
+            namespace: "default".to_owned(),
+            chunk_ids: vec![1],
+            file_id: None,
+            mode: Some("hard".to_owned()),
+        });
+
+        let error = result.expect_err("hard mode should be rejected before reaching core");
+        assert_eq!(error, "mode must be soft; got hard");
     }
 }

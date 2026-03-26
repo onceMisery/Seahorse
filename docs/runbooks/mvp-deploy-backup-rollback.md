@@ -9,7 +9,13 @@
 - server 通过 REST API 暴露 `ingest` / `recall` / `forget` / `rebuild` / `jobs` / `stats` / `health` / `metrics`
 - 部署目标为本地环境或受信内网
 
-以下能力当前不应被视为已完成：
+当前代码已实现并可按本手册执行的能力：
+
+- `/metrics` 已作为正式运维接口实现；仅当 `observability.enable_metrics=true` 时挂载，默认配置开启；默认路径为 `/metrics`，如配置 `observability.metrics_path`，则以配置路径挂载
+- `POST /forget` 当前真实契约按 `mode=soft` 执行；`hard` 不属于当前 MVP 正式发布契约
+- `health` / `stats` / `metrics` 可用于最小人工巡检，`rebuild` / `jobs` 可用于恢复路径操作
+
+以下事项当前仍缺证据 / 缺验证，不应被视为“可发布版 MVP 已完成”：
 
 - `repair_queue` 仅具备最小状态机与 worker 框架，尚未接入完整运行调度
 - observability 已提供基础请求日志与 Prometheus 文本指标，尚未接入分位数/直方图等高级观测能力
@@ -191,15 +197,15 @@
 - 先使用 rebuild 恢复服务
 - 不要把 repair queue 当成已经稳定可依赖的自愈系统
 
-## 9. 已知限制
+## 9. 当前仍缺证据 / 缺验证
 
-当前运行手册必须明确以下限制：
+当前运行手册必须明确以下 release blocker：
 
 - 无正式发布版编译验证记录
-- 无已完成的 E2E 发布验收记录
+- 无自动化 contract / E2E / 故障注入发布验收记录
 - 无 `1 万 chunk` 基线性能验收结果
 - 告警规则仅有 MVP 建议阈值，尚未在统一监控平台完成落地验证
-- 无完整 repair worker 调度与生产级恢复闭环
+- 无完整 repair worker 调度与生产级恢复闭环验证
 
 因此当前更准确的定位是：
 

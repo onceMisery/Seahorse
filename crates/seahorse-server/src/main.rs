@@ -95,15 +95,15 @@ mod tests {
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use axum::body::Body;
-    use axum::http::{Method, Request, StatusCode};
+    use axum::http::{header, Method, Request, StatusCode};
     use http_body_util::BodyExt as _;
     use rusqlite::Connection;
     use seahorse_core::{IngestRequest as CoreIngestRequest, SqliteRepository};
     use serde_json::{json, Value};
     use tower::util::ServiceExt;
 
-    use super::build_app;
-    use crate::state::AppState;
+    use super::{build_app, build_app_with_observability};
+    use crate::{config::ObservabilityConfig, state::AppState};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
     const JOB_POLL_ATTEMPTS: usize = 500;
@@ -402,6 +402,198 @@ mod tests {
         cleanup_db_path(&db_path);
     }
 
+    #[tokio::test]
+    async fn forget_endpoint_rejects_hard_mode_at_api_boundary() {
+        let (state, db_path) = test_state("forget-hard-mode");
+        let app = build_app(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/forget")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "namespace": "default",
+                            "chunk_ids": [1],
+                            "mode": "hard"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build forget request"),
+            )
+            .await
+            .expect("execute forget request");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json_body(response).await;
+        assert_eq!(body["success"], Value::Bool(false));
+        assert_eq!(
+            body["error"]["code"],
+            Value::String("INVALID_INPUT".to_owned())
+        );
+        assert_eq!(
+            body["error"]["message"],
+            Value::String("mode must be soft; got hard".to_owned())
+        );
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[tokio::test]
+    async fn recall_endpoint_rejects_non_basic_mode_at_api_boundary() {
+        let (state, db_path) = test_state("recall-non-basic-mode");
+        let app = build_app(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/recall")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "namespace": "default",
+                            "query": "alpha",
+                            "mode": "semantic"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build recall request"),
+            )
+            .await
+            .expect("execute recall request");
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = read_json_body(response).await;
+        assert_eq!(body["success"], Value::Bool(false));
+        assert_eq!(
+            body["error"]["code"],
+            Value::String("INVALID_INPUT".to_owned())
+        );
+        assert_eq!(
+            body["error"]["message"],
+            Value::String("mode must be basic; got semantic".to_owned())
+        );
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[tokio::test]
+    async fn recall_endpoint_accepts_explicit_basic_mode() {
+        let (state, db_path) = test_state("recall-basic-mode");
+        let app = build_app(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/recall")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "namespace": "default",
+                            "query": "alpha",
+                            "mode": "basic"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build recall request"),
+            )
+            .await
+            .expect("execute recall request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json_body(response).await;
+        assert_eq!(body["success"], Value::Bool(true));
+        assert_eq!(body["error"], Value::Null);
+        assert!(body["data"]["results"].is_array());
+
+        cleanup_db_path(&db_path);
+    }
+    #[tokio::test]
+    async fn metrics_endpoint_respects_observability_config() {
+        let (state, db_path) = test_state("metrics-configured-path");
+        let app = build_app_with_observability(
+            state,
+            &ObservabilityConfig {
+                enable_metrics: true,
+                metrics_path: "/internal/metrics".to_owned(),
+            },
+        );
+
+        let default_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("build default metrics request"),
+            )
+            .await
+            .expect("execute default metrics request");
+        assert_eq!(default_response.status(), StatusCode::NOT_FOUND);
+
+        let custom_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/internal/metrics")
+                    .body(Body::empty())
+                    .expect("build custom metrics request"),
+            )
+            .await
+            .expect("execute custom metrics request");
+
+        assert_eq!(custom_response.status(), StatusCode::OK);
+        assert_eq!(
+            custom_response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; version=0.0.4")
+        );
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_is_absent_when_disabled() {
+        let (state, db_path) = test_state("metrics-disabled");
+        let app = build_app_with_observability(
+            state,
+            &ObservabilityConfig {
+                enable_metrics: false,
+                metrics_path: "/internal/metrics".to_owned(),
+            },
+        );
+
+        let default_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("build default metrics request"),
+            )
+            .await
+            .expect("execute default metrics request");
+        assert_eq!(default_response.status(), StatusCode::NOT_FOUND);
+
+        let custom_response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/internal/metrics")
+                    .body(Body::empty())
+                    .expect("build custom metrics request"),
+            )
+            .await
+            .expect("execute custom metrics request");
+        assert_eq!(custom_response.status(), StatusCode::NOT_FOUND);
+
+        cleanup_db_path(&db_path);
+    }
     fn test_state(name: &str) -> (AppState, PathBuf) {
         let db_path = unique_db_path(name);
         let state = AppState::new_with_db_path(

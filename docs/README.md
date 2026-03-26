@@ -16,7 +16,7 @@
 
 ## 文档用途
 
-- `design-al.md`
+- `design-all.md`
   战略与长期方向，不作为首版直接实施依据。
 
 - `mvp-design-and-roadmap.md`

@@ -57,9 +57,6 @@ components:
               type: array
               items:
                 type: string
-        mode:
-          type: string
-          enum: [basic]
         top_k:
           type: integer
           maximum: 20
@@ -201,6 +198,11 @@ paths:
                 - $ref: '#/components/schemas/BaseRequest'
                 - type: object
                   required: [query]
+                  properties:
+                    mode:
+                      type: string
+                      enum: [basic]
+                      default: basic
       responses:
         '200':
           description: 召回结果
@@ -235,7 +237,7 @@ paths:
                                 enum: [ready, rebuilding, degraded, unavailable]
   /forget:
     post:
-      summary: 标记 chunk 删除
+      summary: 标记 chunk 软删除
       requestBody:
         required: true
         content:
@@ -250,8 +252,9 @@ paths:
                   properties:
                     mode:
                       type: string
-                      enum: [soft, hard]
+                      enum: [soft]
                       default: soft
+                      description: 当前 MVP 正式契约仅支持 soft delete
       responses:
         '200':
           description: 删除响应
@@ -373,3 +376,17 @@ paths:
                             type: string
                           version:
                             type: string
+  /metrics:
+    get:
+      summary: 导出 Prometheus 指标
+      description: |
+        正式运维契约默认暴露 GET /metrics。
+        该端点仅在 observability.enable_metrics=true 时挂载；默认配置为开启。
+        若运行时通过 observability.metrics_path 覆盖路径，则相同格式响应会暴露在配置路径上。
+      responses:
+        '200':
+          description: Prometheus exposition format
+          content:
+            'text/plain; version=0.0.4':
+              schema:
+                type: string
