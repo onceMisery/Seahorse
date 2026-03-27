@@ -6,19 +6,19 @@ use std::thread;
 use std::time::Duration;
 
 use rusqlite::{params, Connection};
+use seahorse_core::{
+    apply_sqlite_migrations, EmbeddingProvider, ForgetError, ForgetPipeline,
+    ForgetRequest as CoreForgetRequest, ForgetResult as CoreForgetResult, InMemoryVectorIndex,
+    IndexEntry, IndexError, IngestError, IngestPipeline, IngestRequest as CoreIngestRequest,
+    IngestResult as CoreIngestResult, MaintenanceJob, RebuildChunkRecord, RebuildError,
+    RebuildRequest as CoreRebuildRequest, RebuildScope, RecallError, RecallPipeline,
+    RecallRequest as CoreRecallRequest, RecallResult as CoreRecallResult, RepairTask,
+    RepairTaskExecutor, RepairWorker, RepairWorkerConfig, RepairWorkerRunResult, SqliteRepository,
+    StorageError, StubEmbeddingProvider, VectorIndex,
+};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::json;
-use seahorse_core::{
-    EmbeddingProvider, InMemoryVectorIndex, IndexEntry, IngestError, IngestPipeline,
-    IngestRequest as CoreIngestRequest, IngestResult as CoreIngestResult, ForgetError,
-    ForgetPipeline, ForgetRequest as CoreForgetRequest, ForgetResult as CoreForgetResult,
-    MaintenanceJob, RecallError, RecallPipeline, RecallRequest as CoreRecallRequest,
-    RecallResult as CoreRecallResult, RebuildChunkRecord, RebuildError,
-    RebuildRequest as CoreRebuildRequest, RebuildScope, RepairTask, RepairTaskExecutor,
-    RepairWorker, RepairWorkerConfig, SqliteRepository, StorageError, StubEmbeddingProvider,
-    VectorIndex, apply_sqlite_migrations,
-};
 
 use crate::config::{load_server_config_default, ServerConfig};
 
@@ -30,15 +30,147 @@ const REPAIR_RECOVERY_ERROR: &str = "repair task recovered after unclean shutdow
 pub struct AppState {
     services: Arc<Mutex<AppServices>>,
     embedding_provider: StubEmbeddingProvider,
-    vector_index: Arc<Mutex<InMemoryVectorIndex>>,
+    vector_index: Arc<Mutex<RuntimeVectorIndex>>,
     repair_db_path: String,
     repair_worker_config: RepairWorkerConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct RuntimeIndexFaultConfig {
+    fail_insert_attempts: usize,
+    fail_rebuild_attempts: usize,
+}
+
+impl RuntimeIndexFaultConfig {
+    pub fn fail_insert_times(mut self, attempts: usize) -> Self {
+        self.fail_insert_attempts = attempts;
+        self
+    }
+
+    pub fn fail_insert_always(mut self) -> Self {
+        self.fail_insert_attempts = usize::MAX;
+        self
+    }
+
+    pub fn fail_rebuild_times(mut self, attempts: usize) -> Self {
+        self.fail_rebuild_attempts = attempts;
+        self
+    }
+
+    fn consume_insert_failure(&mut self) -> bool {
+        consume_fault_attempt(&mut self.fail_insert_attempts)
+    }
+
+    fn consume_rebuild_failure(&mut self) -> bool {
+        consume_fault_attempt(&mut self.fail_rebuild_attempts)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct AppStateTestOptions {
+    runtime_index_faults: RuntimeIndexFaultConfig,
+    spawn_repair_worker: bool,
+}
+
+impl Default for AppStateTestOptions {
+    fn default() -> Self {
+        Self {
+            runtime_index_faults: RuntimeIndexFaultConfig::default(),
+            spawn_repair_worker: true,
+        }
+    }
+}
+
+impl AppStateTestOptions {
+    pub fn with_runtime_index_faults(mut self, faults: RuntimeIndexFaultConfig) -> Self {
+        self.runtime_index_faults = faults;
+        self
+    }
+
+    pub fn with_spawn_repair_worker(mut self, spawn_repair_worker: bool) -> Self {
+        self.spawn_repair_worker = spawn_repair_worker;
+        self
+    }
 }
 
 #[derive(Debug)]
 struct AppServices {
     repository: SqliteRepository,
     db_label: String,
+}
+
+#[derive(Debug)]
+struct RuntimeVectorIndex {
+    inner: InMemoryVectorIndex,
+    faults: RuntimeIndexFaultConfig,
+}
+
+impl RuntimeVectorIndex {
+    fn new(dimension: usize) -> Self {
+        Self {
+            inner: InMemoryVectorIndex::new(dimension),
+            faults: RuntimeIndexFaultConfig::default(),
+        }
+    }
+
+    fn set_faults(&mut self, faults: RuntimeIndexFaultConfig) {
+        self.faults = faults;
+    }
+
+    fn maybe_fail_insert(&mut self, entries: &[IndexEntry]) -> Result<(), IndexError> {
+        if self.faults.consume_insert_failure() {
+            return Err(synthetic_dimension_mismatch(
+                self.inner.dimension(),
+                entries.first().map(|entry| entry.vector.len()),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn maybe_fail_rebuild(&mut self, entries: &[IndexEntry]) -> Result<(), IndexError> {
+        if self.faults.consume_rebuild_failure() {
+            return Err(synthetic_dimension_mismatch(
+                self.inner.dimension(),
+                entries.first().map(|entry| entry.vector.len()),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl VectorIndex for RuntimeVectorIndex {
+    fn dimension(&self) -> usize {
+        self.inner.dimension()
+    }
+
+    fn insert(&mut self, entries: &[IndexEntry]) -> seahorse_core::IndexResult<()> {
+        self.maybe_fail_insert(entries)?;
+        self.inner.insert(entries)
+    }
+
+    fn search(
+        &self,
+        request: &seahorse_core::SearchRequest,
+    ) -> seahorse_core::IndexResult<Vec<seahorse_core::SearchHit>> {
+        self.inner.search(request)
+    }
+
+    fn mark_deleted(
+        &mut self,
+        namespace: &str,
+        chunk_ids: &[i64],
+    ) -> seahorse_core::IndexResult<usize> {
+        self.inner.mark_deleted(namespace, chunk_ids)
+    }
+
+    fn rebuild(&mut self, entries: &[IndexEntry]) -> seahorse_core::IndexResult<()> {
+        self.maybe_fail_rebuild(entries)?;
+        self.inner.rebuild(entries)
+    }
 }
 
 #[derive(Debug)]
@@ -81,7 +213,7 @@ struct IndexDeleteRepairPayload {
 struct ServerRepairTaskExecutor {
     db_path: String,
     embedding_provider: StubEmbeddingProvider,
-    vector_index: Arc<Mutex<InMemoryVectorIndex>>,
+    vector_index: Arc<Mutex<RuntimeVectorIndex>>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +267,21 @@ impl AppState {
     }
 
     pub fn new_with_config(config: &ServerConfig) -> Result<Self, String> {
+        Self::new_with_runtime_options(config, AppStateTestOptions::default())
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_test_options(
+        config: &ServerConfig,
+        options: AppStateTestOptions,
+    ) -> Result<Self, String> {
+        Self::new_with_runtime_options(config, options)
+    }
+
+    fn new_with_runtime_options(
+        config: &ServerConfig,
+        options: AppStateTestOptions,
+    ) -> Result<Self, String> {
         let repair_worker_config = config.jobs.repair_worker_config();
         if repair_worker_config.max_retries == 0 {
             return Err("repair_max_retries must be greater than zero".to_owned());
@@ -154,11 +301,12 @@ impl AppState {
                 REPAIR_RECOVERY_ERROR,
             )
             .map_err(|error| format!("failed to recover running repair tasks: {error}"))?;
-        let mut vector_index = InMemoryVectorIndex::new(embedding_provider.dimension());
+        let mut vector_index = RuntimeVectorIndex::new(embedding_provider.dimension());
         let bootstrap_entries = build_bootstrap_entries(&embedding_provider, &bootstrap_chunks)?;
         vector_index
             .insert(&bootstrap_entries)
             .map_err(|error| format!("failed to warm in-memory index from sqlite: {error}"))?;
+        vector_index.set_faults(options.runtime_index_faults.clone());
         let has_active_rebuild = repository
             .find_active_maintenance_job("rebuild", DEFAULT_NAMESPACE)
             .map_err(|error| format!("failed to inspect active rebuild job: {error}"))?
@@ -187,7 +335,9 @@ impl AppState {
             repair_worker_config,
         };
         state.recover_active_rebuild_job()?;
-        state.spawn_repair_worker()?;
+        if options.spawn_repair_worker {
+            state.spawn_repair_worker()?;
+        }
 
         Ok(state)
     }
@@ -199,6 +349,23 @@ impl AppState {
         Self::new_with_config(&config)
     }
 
+    #[doc(hidden)]
+    pub fn run_repair_worker_once_for_tests(&self) -> Result<RepairWorkerRunResult, String> {
+        let mut repository = open_runtime_repository(&self.repair_db_path)?;
+        let mut executor = ServerRepairTaskExecutor {
+            db_path: self.repair_db_path.clone(),
+            embedding_provider: self.embedding_provider.clone(),
+            vector_index: Arc::clone(&self.vector_index),
+        };
+        let mut worker =
+            RepairWorker::new(&mut repository, &mut executor, self.repair_worker_config)
+                .map_err(|error| format!("failed to create test repair worker: {error}"))?;
+
+        worker
+            .run_once(DEFAULT_NAMESPACE)
+            .map_err(|error| format!("failed to run test repair worker: {error}"))
+    }
+
     pub fn ingest(&self, request: CoreIngestRequest) -> Result<CoreIngestResult, AppStateError> {
         let mut services = self
             .services
@@ -207,12 +374,12 @@ impl AppState {
                 message: "application state lock poisoned",
             })?;
         let provider = self.embedding_provider.clone();
-        let mut vector_index = self
-            .vector_index
-            .lock()
-            .map_err(|_| AppStateError::Unavailable {
-                message: "vector index lock poisoned",
-            })?;
+        let mut vector_index =
+            self.vector_index
+                .lock()
+                .map_err(|_| AppStateError::Unavailable {
+                    message: "vector index lock poisoned",
+                })?;
         let mut pipeline =
             IngestPipeline::new(&mut services.repository, &provider, &mut *vector_index);
 
@@ -247,12 +414,12 @@ impl AppState {
             .map_err(|_| AppStateError::Unavailable {
                 message: "application state lock poisoned",
             })?;
-        let mut vector_index = self
-            .vector_index
-            .lock()
-            .map_err(|_| AppStateError::Unavailable {
-                message: "vector index lock poisoned",
-            })?;
+        let mut vector_index =
+            self.vector_index
+                .lock()
+                .map_err(|_| AppStateError::Unavailable {
+                    message: "vector index lock poisoned",
+                })?;
         let mut pipeline = ForgetPipeline::new(&mut services.repository, &mut *vector_index);
 
         pipeline.forget(request).map_err(AppStateError::Forget)
@@ -394,10 +561,9 @@ impl AppState {
 
     fn recover_active_rebuild_job(&self) -> Result<(), String> {
         let active_job = {
-            let mut services = self
-                .services
-                .lock()
-                .map_err(|_| "application state lock poisoned during startup recovery".to_owned())?;
+            let mut services = self.services.lock().map_err(|_| {
+                "application state lock poisoned during startup recovery".to_owned()
+            })?;
             let active_jobs = services
                 .repository
                 .list_active_maintenance_jobs("rebuild", DEFAULT_NAMESPACE)
@@ -545,12 +711,12 @@ impl AppState {
         }
 
         {
-            let mut vector_index = self
-                .vector_index
-                .lock()
-                .map_err(|_| AppStateError::Unavailable {
-                    message: "vector index lock poisoned",
-                })?;
+            let mut vector_index =
+                self.vector_index
+                    .lock()
+                    .map_err(|_| AppStateError::Unavailable {
+                        message: "vector index lock poisoned",
+                    })?;
             match work.scope {
                 RebuildScope::All => vector_index
                     .rebuild(entries)
@@ -573,7 +739,11 @@ impl AppState {
             .map_err(|_| AppStateError::Unavailable {
                 message: "application state lock poisoned",
             })?;
-        let chunk_ids = work.chunks.iter().map(|chunk| chunk.chunk_id).collect::<Vec<_>>();
+        let chunk_ids = work
+            .chunks
+            .iter()
+            .map(|chunk| chunk.chunk_id)
+            .collect::<Vec<_>>();
         services
             .repository
             .mark_chunks_ready(&work.namespace, &chunk_ids)
@@ -582,10 +752,11 @@ impl AppState {
             .repository
             .refresh_file_statuses(&work.namespace)
             .map_err(AppStateError::Storage)?;
-        sync_runtime_schema_meta(&mut services.repository, &work.provider, "ready")
-            .map_err(|_| AppStateError::Unavailable {
+        sync_runtime_schema_meta(&mut services.repository, &work.provider, "ready").map_err(
+            |_| AppStateError::Unavailable {
                 message: "failed to persist ready rebuild state",
-            })?;
+            },
+        )?;
 
         let progress = format!("{0}/{0}", chunk_ids.len());
         let result_summary = format!(
@@ -626,8 +797,8 @@ impl AppState {
             return Ok(());
         }
 
-        let fallback_index_state = derive_index_state(&services.repository)
-            .map_err(AppStateError::Storage)?;
+        let fallback_index_state =
+            derive_index_state(&services.repository).map_err(AppStateError::Storage)?;
         services
             .repository
             .finish_maintenance_job(job_id, "failed", None, None, Some(error_message))
@@ -661,7 +832,8 @@ impl AppState {
             return Ok(());
         }
 
-        let fallback_index_state = derive_index_state(repository).map_err(AppStateError::Storage)?;
+        let fallback_index_state =
+            derive_index_state(repository).map_err(AppStateError::Storage)?;
         repository
             .set_schema_meta_value("index_state", &fallback_index_state)
             .map_err(AppStateError::Storage)?;
@@ -722,12 +894,13 @@ impl ServerRepairTaskExecutor {
             let vector = self
                 .embedding_provider
                 .embed(&record.chunk_text)
-                .map_err(|error| format!("failed to embed chunk {} for repair: {error}", record.chunk_id))?;
-            entries.push(IndexEntry::new(
-                record.chunk_id,
-                record.namespace,
-                vector,
-            ));
+                .map_err(|error| {
+                    format!(
+                        "failed to embed chunk {} for repair: {error}",
+                        record.chunk_id
+                    )
+                })?;
+            entries.push(IndexEntry::new(record.chunk_id, record.namespace, vector));
         }
 
         {
@@ -742,7 +915,12 @@ impl ServerRepairTaskExecutor {
 
         repository
             .mark_chunks_ready(&task.namespace, &payload.chunk_ids)
-            .map_err(|error| format!("failed to mark chunks ready for repair task {}: {error}", task.id))?;
+            .map_err(|error| {
+                format!(
+                    "failed to mark chunks ready for repair task {}: {error}",
+                    task.id
+                )
+            })?;
         repository
             .refresh_file_statuses(&task.namespace)
             .map_err(|error| {
@@ -751,7 +929,7 @@ impl ServerRepairTaskExecutor {
                     task.id
                 )
             })?;
-        let index_state = derive_index_state(&repository)
+        let index_state = derive_index_state_after_repair(&repository, &task.namespace, task.id)
             .map_err(|error| format!("failed to derive repair index state: {error}"))?;
         sync_runtime_schema_meta(&mut repository, &self.embedding_provider, &index_state)?;
 
@@ -781,7 +959,7 @@ impl ServerRepairTaskExecutor {
         drop(vector_index);
 
         let mut repository = open_runtime_repository(&self.db_path)?;
-        let index_state = derive_index_state(&repository)
+        let index_state = derive_index_state_after_repair(&repository, &task.namespace, task.id)
             .map_err(|error| format!("failed to derive repair index state: {error}"))?;
         sync_runtime_schema_meta(&mut repository, &self.embedding_provider, &index_state)?;
 
@@ -809,7 +987,7 @@ fn run_repair_worker_loop(
     db_path: String,
     repair_worker_config: RepairWorkerConfig,
     embedding_provider: StubEmbeddingProvider,
-    vector_index: Arc<Mutex<InMemoryVectorIndex>>,
+    vector_index: Arc<Mutex<RuntimeVectorIndex>>,
 ) {
     loop {
         let mut repository = match open_runtime_repository(&db_path) {
@@ -826,9 +1004,9 @@ fn run_repair_worker_loop(
         };
         let mut worker =
             match RepairWorker::new(&mut repository, &mut executor, repair_worker_config) {
-            Ok(worker) => worker,
-            Err(_) => return,
-        };
+                Ok(worker) => worker,
+                Err(_) => return,
+            };
 
         loop {
             match worker.run_once(DEFAULT_NAMESPACE) {
@@ -846,13 +1024,37 @@ fn run_repair_worker_loop(
     }
 }
 
+fn consume_fault_attempt(remaining: &mut usize) -> bool {
+    if *remaining == 0 {
+        return false;
+    }
+
+    if *remaining != usize::MAX {
+        *remaining -= 1;
+    }
+
+    true
+}
+
+fn synthetic_dimension_mismatch(expected: usize, actual: Option<usize>) -> IndexError {
+    let actual = actual.unwrap_or_else(|| expected.saturating_add(1));
+    let actual = if actual == expected {
+        actual.saturating_add(1)
+    } else {
+        actual
+    };
+
+    IndexError::DimensionMismatch { expected, actual }
+}
+
 fn open_repository(path: &str) -> Result<(SqliteRepository, Vec<BootstrapChunk>), String> {
     let connection = if path == ":memory:" {
         Connection::open_in_memory()
             .map_err(|error| format!("failed to open sqlite memory database: {error}"))?
     } else {
         ensure_parent_dir(path)?;
-        Connection::open(path).map_err(|error| format!("failed to open sqlite database: {error}"))?
+        Connection::open(path)
+            .map_err(|error| format!("failed to open sqlite database: {error}"))?
     };
 
     apply_sqlite_migrations(&connection)
@@ -870,7 +1072,8 @@ fn open_runtime_repository(path: &str) -> Result<SqliteRepository, String> {
             .map_err(|error| format!("failed to open sqlite memory database: {error}"))?
     } else {
         ensure_parent_dir(path)?;
-        Connection::open(path).map_err(|error| format!("failed to open sqlite database: {error}"))?
+        Connection::open(path)
+            .map_err(|error| format!("failed to open sqlite database: {error}"))?
     };
 
     apply_sqlite_migrations(&connection)
@@ -900,8 +1103,12 @@ fn ensure_parent_dir(path: &str) -> Result<(), String> {
         return Ok(());
     }
 
-    fs::create_dir_all(parent)
-        .map_err(|error| format!("failed to create database directory {}: {error}", parent.display()))
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "failed to create database directory {}: {error}",
+            parent.display()
+        )
+    })
 }
 
 fn load_bootstrap_chunks(connection: &Connection) -> Result<Vec<BootstrapChunk>, String> {
@@ -942,7 +1149,12 @@ fn build_bootstrap_entries(
     for chunk in chunks {
         let vector = embedding_provider
             .embed(&chunk.chunk_text)
-            .map_err(|error| format!("failed to embed bootstrap chunk {}: {error}", chunk.chunk_id))?;
+            .map_err(|error| {
+                format!(
+                    "failed to embed bootstrap chunk {}: {error}",
+                    chunk.chunk_id
+                )
+            })?;
         entries.push(IndexEntry::new(
             chunk.chunk_id,
             chunk.namespace.clone(),
@@ -1000,7 +1212,23 @@ fn current_index_state(repository: &SqliteRepository) -> Result<String, AppState
 
 fn derive_index_state(repository: &SqliteRepository) -> Result<String, StorageError> {
     if repository.has_repair_backlog(DEFAULT_NAMESPACE)?
-        || !repository.list_missing_index_chunks(DEFAULT_NAMESPACE)?.is_empty()
+        || !repository
+            .list_missing_index_chunks(DEFAULT_NAMESPACE)?
+            .is_empty()
+    {
+        Ok("degraded".to_owned())
+    } else {
+        Ok("ready".to_owned())
+    }
+}
+
+fn derive_index_state_after_repair(
+    repository: &SqliteRepository,
+    namespace: &str,
+    completed_task_id: i64,
+) -> Result<String, StorageError> {
+    if repository.has_repair_backlog_excluding(namespace, completed_task_id)?
+        || !repository.list_missing_index_chunks(namespace)?.is_empty()
     {
         Ok("degraded".to_owned())
     } else {
@@ -1040,8 +1268,11 @@ fn load_job(repository: &SqliteRepository, job_id: i64) -> Result<MaintenanceJob
 
 fn rebuild_request_from_job(job: &MaintenanceJob) -> Result<CoreRebuildRequest, String> {
     let payload = match job.payload_json.as_deref() {
-        Some(payload_json) => serde_json::from_str::<RebuildJobPayload>(payload_json)
-            .map_err(|error| format!("invalid rebuild job payload for job_id {}: {error}", job.id))?,
+        Some(payload_json) => {
+            serde_json::from_str::<RebuildJobPayload>(payload_json).map_err(|error| {
+                format!("invalid rebuild job payload for job_id {}: {error}", job.id)
+            })?
+        }
         None => RebuildJobPayload { scope: None },
     };
 
