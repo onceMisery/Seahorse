@@ -20,15 +20,11 @@ use seahorse_core::{
     VectorIndex, apply_sqlite_migrations,
 };
 
-const DEFAULT_DB_PATH: &str = "./data/seahorse.db";
-const DEFAULT_EMBEDDING_DIMENSION: usize = 1024;
+use crate::config::{load_server_config_default, ServerConfig};
+
 const DEFAULT_NAMESPACE: &str = "default";
 const REPAIR_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const REPAIR_RECOVERY_ERROR: &str = "repair task recovered after unclean shutdown";
-const REPAIR_WORKER_CONFIG: RepairWorkerConfig = RepairWorkerConfig {
-    max_retries: 3,
-    batch_size: 1,
-};
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -36,6 +32,7 @@ pub struct AppState {
     embedding_provider: StubEmbeddingProvider,
     vector_index: Arc<Mutex<InMemoryVectorIndex>>,
     repair_db_path: String,
+    repair_worker_config: RepairWorkerConfig,
 }
 
 #[derive(Debug)]
@@ -133,18 +130,27 @@ impl std::error::Error for AppStateError {}
 
 impl AppState {
     pub fn new() -> Result<Self, String> {
-        let db_path = std::env::var("SEAHORSE_DB_PATH").unwrap_or_else(|_| DEFAULT_DB_PATH.to_owned());
-        Self::new_with_db_path(&db_path)
+        let config = load_server_config_default()?;
+        Self::new_with_config(&config)
     }
 
-    pub(crate) fn new_with_db_path(db_path: &str) -> Result<Self, String> {
-        let embedding_provider = StubEmbeddingProvider::from_dimension(DEFAULT_EMBEDDING_DIMENSION)
+    pub fn new_with_config(config: &ServerConfig) -> Result<Self, String> {
+        let repair_worker_config = config.jobs.repair_worker_config();
+        if repair_worker_config.max_retries == 0 {
+            return Err("repair_max_retries must be greater than zero".to_owned());
+        }
+        if repair_worker_config.batch_size == 0 {
+            return Err("repair_batch_size must be greater than zero".to_owned());
+        }
+
+        let db_path = config.storage.db_path.as_str();
+        let embedding_provider = StubEmbeddingProvider::from_dimension(config.embedding.dimension)
             .map_err(|error| format!("failed to initialize embedding provider: {error}"))?;
         let (mut repository, bootstrap_chunks) = open_repository(db_path)?;
         repository
             .recover_running_repair_tasks(
                 DEFAULT_NAMESPACE,
-                REPAIR_WORKER_CONFIG.max_retries,
+                repair_worker_config.max_retries,
                 REPAIR_RECOVERY_ERROR,
             )
             .map_err(|error| format!("failed to recover running repair tasks: {error}"))?;
@@ -178,11 +184,19 @@ impl AppState {
             embedding_provider,
             vector_index: Arc::new(Mutex::new(vector_index)),
             repair_db_path: db_path.to_owned(),
+            repair_worker_config,
         };
         state.recover_active_rebuild_job()?;
         state.spawn_repair_worker()?;
 
         Ok(state)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new_with_db_path(db_path: &str) -> Result<Self, String> {
+        let mut config = ServerConfig::default();
+        config.storage.db_path = db_path.to_owned();
+        Self::new_with_config(&config)
     }
 
     pub fn ingest(&self, request: CoreIngestRequest) -> Result<CoreIngestResult, AppStateError> {
@@ -361,12 +375,18 @@ impl AppState {
         }
 
         let db_path = self.repair_db_path.clone();
+        let repair_worker_config = self.repair_worker_config;
         let embedding_provider = self.embedding_provider.clone();
         let vector_index = Arc::clone(&self.vector_index);
         thread::Builder::new()
             .name("seahorse-repair-default".to_owned())
             .spawn(move || {
-                run_repair_worker_loop(db_path, embedding_provider, vector_index);
+                run_repair_worker_loop(
+                    db_path,
+                    repair_worker_config,
+                    embedding_provider,
+                    vector_index,
+                );
             })
             .map(|_| ())
             .map_err(|error| format!("failed to spawn repair worker: {error}"))
@@ -787,6 +807,7 @@ impl RepairTaskExecutor for ServerRepairTaskExecutor {
 
 fn run_repair_worker_loop(
     db_path: String,
+    repair_worker_config: RepairWorkerConfig,
     embedding_provider: StubEmbeddingProvider,
     vector_index: Arc<Mutex<InMemoryVectorIndex>>,
 ) {
@@ -803,8 +824,8 @@ fn run_repair_worker_loop(
             embedding_provider: embedding_provider.clone(),
             vector_index: Arc::clone(&vector_index),
         };
-        let mut worker = match RepairWorker::new(&mut repository, &mut executor, REPAIR_WORKER_CONFIG)
-        {
+        let mut worker =
+            match RepairWorker::new(&mut repository, &mut executor, repair_worker_config) {
             Ok(worker) => worker,
             Err(_) => return,
         };

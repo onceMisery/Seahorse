@@ -1,54 +1,20 @@
-# Seahorse MVP example configuration
-# This file is an implementation target for config loading, not a final production template.
+# Seahorse MVP runtime configuration example
 
 [storage]
 db_path = "./data/seahorse.db"
-migrations_dir = "./migrations"
-namespace = "default"
-enable_wal = true
-busy_timeout_ms = 5000
 
 [embedding]
-provider = "stub"
-model_id = "local-dev-embedding-v1"
 dimension = 1024
-timeout_ms = 15000
-max_batch_size = 32
-
-[index]
-provider = "hnsw"
-ef_search = 64
-ef_construction = 200
-m = 16
-enable_visibility_filter = true
-
-[pipeline]
-default_top_k = 10
-max_top_k = 20
-max_content_bytes = 1048576
-max_tag_count = 32
-max_tag_length = 64
-max_metadata_bytes = 16384
-default_chunk_mode = "fixed"
-default_dedup_mode = "reject"
 
 [jobs]
 repair_max_retries = 3
-rebuild_max_concurrency = 1
-rebuild_batch_size = 128
+repair_batch_size = 1
 
 [api]
 host = "127.0.0.1"
 port = 8080
-request_timeout_ms = 30000
-expose_admin_endpoints = true
 
 [observability]
 log_level = "info"
 enable_metrics = true
 metrics_path = "/metrics"
-health_path = "/health"
-
-[runtime]
-environment = "local"
-allow_public_bind = false

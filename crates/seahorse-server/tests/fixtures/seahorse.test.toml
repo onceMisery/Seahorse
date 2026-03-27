@@ -1,0 +1,18 @@
+[storage]
+db_path = "./tmp/runtime.db"
+
+[embedding]
+dimension = 32
+
+[api]
+host = "127.0.0.1"
+port = 18080
+
+[observability]
+log_level = "debug"
+enable_metrics = true
+metrics_path = "internal/metrics"
+
+[jobs]
+repair_max_retries = 7
+repair_batch_size = 3
