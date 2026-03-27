@@ -1,15 +1,30 @@
 # Seahorse MVP Release Readiness
 
-## 执行信息
+## 当前结论
+
+- 当前版本可以视为“发布候选 MVP”
+- 已关闭的关键 release blocker：runtime config、contract、E2E、fault recovery、10k chunk perf gate 实现
+- 当前仍未关闭的 release blocker：结构化请求日志、监控平台告警落地、release 环境 10k chunk hard gate 最终过线
+
+## 已验证证据
+
+| Area | Command | Result |
+| --- | --- | --- |
+| seahorse-server 回归 | `cargo test -p seahorse-server -- --nocapture` | PASS |
+| seahorse-core 库测试 | `cargo test -p seahorse-core --lib -- --nocapture` | PASS |
+| fault recovery | `cargo test -p seahorse-server --test fault_recovery -- --nocapture` | PASS |
+| perf gate smoke | `cargo test -p seahorse-server --test perf_baseline -- --nocapture` | PASS (`perf_gate_env_parsers_support_record_only_overrides`) |
+| 10k chunk hard gate | `cargo test -p seahorse-server perf_baseline_10k -- --ignored --nocapture` | FAIL on current machine |
+
+## 10k Chunk 基线样本
 
 - 执行日期: 2026-03-27
 - Git commit: `fbf58bb`
-- 测试命令: `cargo test -p seahorse-server perf_baseline_10k -- --ignored --nocapture`
 - 运行模式: hard gate
 - record-only 开关: `SEAHORSE_PERF_RECORD_ONLY=1`
 - p95 阈值覆盖: `SEAHORSE_PERF_RECALL_P95_MS_MAX=<ms>`
 
-## 样本规模
+### 样本规模
 
 - 文档数: 200
 - 总 chunks: 10,000
@@ -19,7 +34,7 @@
 - recall `top_k`: 5
 - rebuild scope: `all`
 
-## 指标结果
+### 指标结果
 
 | Metric | Value |
 | --- | ---: |
@@ -29,19 +44,14 @@
 | `rebuild_total_ms` | 79723.94 |
 | `recall_p95_gate_ms` | 300.00 |
 
-## 结论
+### 结论
 
-- `10k chunk` 性能 release gate: 当前本机样本未通过
-- 判定依据: `recall_p95_ms=364.01 >= 300.00`
-- 当前结果已作为本机基线样本记录，后续需要在更稳定的 release 环境重新跑 hard gate
+- 当前本机 hard gate 未通过：`recall_p95_ms=364.01 >= 300.00`
+- gate 逻辑已存在，当前数据已归档
+- 本机如果只需要保留数据点，可使用 `SEAHORSE_PERF_RECORD_ONLY=1`
 
-## 备注
+## 后续动作
 
-- 该测试位于 `crates/seahorse-server/tests/perf_baseline.rs`
-- 测试默认启用 hard gate；本地环境如果波动过大，可临时切到 record-only 模式保留数据点
-- record-only 模式的开关解析已由轻量测试覆盖，但 10k 样本的本机 record-only 长跑本次未额外固化为第二份数据
-- 本次测量对应的运行时代码是 `fbf58bb test: verify repair and rebuild fault recovery`
-- 下一步优化方向:
-  - 在更稳定的 release 机器上复测 hard gate
-  - 继续观察 recall 热路径在 10k chunk 下的 p95 波动
-  - 评估是否需要单独的 release profile/perf 环境来承载最终发布门禁
+1. 在更稳定的 release 机器上复测 10k chunk hard gate
+2. 完成 operator docs 与 release handoff 文档最终收口
+3. 在监控平台落地告警规则并保留验证记录

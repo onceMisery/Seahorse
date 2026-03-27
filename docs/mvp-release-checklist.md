@@ -56,13 +56,6 @@
    - `seahorse_index_state`
    - `seahorse_health_status`
 
-建议至少完成一组告警规则验证（手工或预发布环境）：
-
-1. `seahorse_health_status{status="failed"} == 1` 可触发告警
-2. `seahorse_index_state{state="degraded"} == 1` 持续触发告警
-3. `error_rate > 5%`（基于 `request_errors_total / requests_total`）可触发告警
-4. 告警恢复后可自动清除
-
 ## 6. 状态与可恢复性
 
 - `files.ingest_status` 状态流转符合设计
@@ -70,22 +63,31 @@
 - `schema_meta.index_state` 可反映 `ready / rebuilding / degraded`
 - 重启后 active rebuild job 可恢复
 - 多个 active rebuild job 启动恢复时仅保留最新一条
-- repair queue 自动修复、deadletter、running recovery 已有自动化验证
 
-## 7. 已补齐的 release gates
+## 7. 当前代码已实现（含已关闭的 release blocker）
 
-- runtime config 与 observability 契约验证已补齐
-- contract / lifecycle / fault recovery 自动化测试已补齐
-- `10k chunk` 性能 gate 已实现，结果记录在 `docs/reports/2026-03-26-mvp-release-readiness.md`
-- 本机样本若波动过大，可使用 `SEAHORSE_PERF_RECORD_ONLY=1` 仅记录基线数据
+- HTTP 主链路接口已实现：`POST /ingest`、`POST /recall`、`POST /forget`、`POST /admin/rebuild`、`GET /admin/jobs/{job_id}`、`GET /stats`、`GET /health`
+- `/metrics` 已作为正式运维接口实现；仅当 `enable_metrics=true` 时挂载，默认配置开启，默认路径为 `/metrics`，也可由 `observability.metrics_path` 覆盖
+- `POST /forget` 当前正式契约固定为 `mode=soft`，`hard` 不属于当前 MVP 发布契约
+- SQLite 备份、回滚、rebuild、health / stats / metrics 的人工巡检路径已在现有文档中定义
 
-## 8. 当前未完成项
+## 8. 当前仍缺证据 / 缺验证
 
-以下项未完成时，不应将当前版本定义为“所有发布收口工作已结束”：
+以下 release blocker 需要区分“已关闭”和“仍未关闭”：
+
+已关闭的 release blocker 证据：
+
+- `contract`: `cargo test -p seahorse-server -- --nocapture` 已通过，覆盖 API contract 与 runtime config
+- `E2E`: `cargo test -p seahorse-server -- --nocapture` 已通过，覆盖 lifecycle roundtrip 与 rebuild 查询链路
+- `故障注入`: `cargo test -p seahorse-server --test fault_recovery -- --nocapture` 已通过，覆盖 repair success / deadletter / running recovery / rebuild fallback
+- `10k chunk` 性能 gate 已存在：`cargo test -p seahorse-server perf_baseline_10k -- --ignored --nocapture`
+  - 当前本机 hard gate 样本未通过，详见 `docs/reports/2026-03-26-mvp-release-readiness.md`
+  - 本机如需只记录数据点，可使用 `SEAHORSE_PERF_RECORD_ONLY=1`
+
+当前仍未关闭的 release blocker：
 
 - 结构化请求日志完整接入
 - 告警规则在监控平台正式落地（当前仅给出 MVP 阈值建议）
-- README / docs index / runbook / release handoff 文档最终收口
 - release 环境上的 `10k chunk` hard gate 最终过线确认
 
 ## 9. 当前结论

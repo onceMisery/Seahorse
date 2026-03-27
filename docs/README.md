@@ -1,53 +1,29 @@
 # Seahorse Docs Index
 
-## MVP 开发必读
+## 可发布版 MVP 必读顺序
 
-1. `mvp-design-and-roadmap.md`
-2. `mvp-issue-breakdown.md`
-3. `mvp-agent-handoff.md`
-4. `mvp-first-batch-issues.md`
-5. `mvp-agent-prompts-batch1.md`
-6. `mvp-agent-prompts-batch2.md`
-7. `mvp-agent-prompts-batch3.md`
-8. `mvp-agent-prompts-batch4.md`
-9. `mvp-openapi.yaml`
-10. `mvp-schema.sql`
-11. `mvp-config.example.toml`
+1. `design-all.md`
+2. `mvp-design-and-roadmap.md`
+3. `mvp-openapi.yaml`
+4. `mvp-release-checklist.md`
+5. `runbooks/mvp-deploy-backup-rollback.md`
+6. `reports/2026-03-26-mvp-release-readiness.md`
 
-## 文档用途
+## 其他文档
 
 - `design-all.md`
-  战略与长期方向，不作为首版直接实施依据。
-
+  长期设计背景与范围边界，帮助理解为什么 MVP 只收口 SQLite + vector recall + REST API。
 - `mvp-design-and-roadmap.md`
-  MVP 设计基线，定义范围、主链路、状态机、错误码、验收标准。
-
-- `mvp-issue-breakdown.md`
-  把 MVP 设计基线拆成里程碑、Epic 和 Issue。
-
-- `mvp-agent-handoff.md`
-  给开发 agents 的分工、文件归属、并行顺序和交付模板。
-
-- `mvp-first-batch-issues.md`
-  第一轮开发的直接发单清单，按优先级和依赖排序。
-
-- `mvp-agent-prompts-batch1.md`
-  第一批 issue 的可直接分发 prompt。
-
-- `mvp-agent-prompts-batch2.md`
-  第二批 issue 的可直接分发 prompt。
-
-- `mvp-agent-prompts-batch3.md`
-  第三批 issue 的可直接分发 prompt。
-
-- `mvp-agent-prompts-batch4.md`
-  第四批 issue 的可直接分发 prompt。
-
+  MVP 设计基线，定义状态机、主链路、验收门槛与 release gates。
 - `mvp-openapi.yaml`
-  MVP API 契约草案。
-
-- `mvp-schema.sql`
-  MVP SQLite DDL 草案。
-
+  当前正式 API 契约。
+- `mvp-release-checklist.md`
+  发布前核对项、已关闭的 release blocker 证据、剩余待收口事项。
+- `runbooks/mvp-deploy-backup-rollback.md`
+  部署、备份、回滚、rebuild、health / stats / metrics 巡检手册。
+- `reports/2026-03-26-mvp-release-readiness.md`
+  当前 release readiness 证据汇总，包括测试命令、通过情况与性能基线结果。
+- `mvp-issue-breakdown.md`
+  MVP issue 拆解和历史工作分批信息。
 - `mvp-config.example.toml`
-  MVP 配置样例，供 config loader 和运行时实现参考。
+  配置示例。
