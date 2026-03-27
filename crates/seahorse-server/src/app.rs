@@ -41,6 +41,19 @@ pub fn build_app_with_observability(
         ))
 }
 
+pub fn build_test_app(_name: &str) -> Router {
+    let state = AppState::new_with_db_path(":memory:").expect("create app state");
+    build_app(state)
+}
+
+pub fn build_test_app_with_observability(
+    _name: &str,
+    observability_config: &ObservabilityConfig,
+) -> Router {
+    let state = AppState::new_with_db_path(":memory:").expect("create app state");
+    build_app_with_observability(state, observability_config)
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -59,6 +72,7 @@ mod tests {
     use super::{build_app, build_app_with_observability};
     use crate::{config::ObservabilityConfig, state::AppState};
 
+    static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(1);
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
     const JOB_POLL_ATTEMPTS: usize = 500;
     const JOB_POLL_SLEEP_MS: u64 = 20;
@@ -565,6 +579,18 @@ mod tests {
         (state, db_path)
     }
 
+    fn build_test_state(name: &str) -> (AppState, PathBuf) {
+        let db_path = unique_test_db_path(name);
+        let state = AppState::new_with_db_path(
+            db_path
+                .to_str()
+                .expect("temp db path must be valid unicode"),
+        )
+        .expect("create app state");
+
+        (state, db_path)
+    }
+
     fn seed_rebuild_dataset(state: &AppState, prefix: &str) {
         for index in 0..8 {
             let mut ingest_request = CoreIngestRequest::new(heavy_rebuild_content(prefix, index));
@@ -663,6 +689,15 @@ mod tests {
 
     fn unique_db_path(name: &str) -> PathBuf {
         let counter = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_millis();
+        std::env::temp_dir().join(format!("seahorse-{name}-{millis}-{counter}.db"))
+    }
+
+    fn unique_test_db_path(name: &str) -> PathBuf {
+        let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
         let millis = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time before unix epoch")
