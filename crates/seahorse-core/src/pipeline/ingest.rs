@@ -200,11 +200,7 @@ where
             });
         }
 
-        let texts = chunks
-            .iter()
-            .map(|chunk| chunk.text.clone())
-            .collect::<Vec<_>>();
-        let embeddings = embed_texts(self.embedding_provider, &texts)?;
+        let embeddings = self.resolve_chunk_embeddings(&request.namespace, &chunks)?;
         if embeddings.len() != chunks.len() {
             return Err(IngestError::Embedding(EmbeddingError::ProviderFailure {
                 provider: "pipeline",
@@ -422,6 +418,75 @@ where
             }
         }
     }
+
+    fn resolve_chunk_embeddings(
+        &mut self,
+        namespace: &str,
+        chunks: &[super::chunker::Chunk],
+    ) -> Result<Vec<Vec<f32>>, IngestError> {
+        let mut embeddings = vec![Vec::new(); chunks.len()];
+        let mut pending_indices = Vec::new();
+        let mut pending_texts = Vec::new();
+
+        for (index, chunk) in chunks.iter().enumerate() {
+            let cached = self.repository.get_cached_embedding(
+                namespace,
+                &chunk.content_hash,
+                self.embedding_provider.model_id(),
+            )?;
+
+            if let Some(cached) = cached {
+                let cached_dimension = cached.dimension.max(0) as usize;
+                if cached_dimension == self.embedding_provider.dimension()
+                    && cached.vector.len() == self.embedding_provider.dimension()
+                {
+                    embeddings[index] = cached.vector;
+                    continue;
+                }
+            }
+
+            pending_indices.push(index);
+            pending_texts.push(chunk.text.clone());
+        }
+
+        if pending_texts.is_empty() {
+            return Ok(embeddings);
+        }
+
+        let fresh_embeddings = embed_texts(self.embedding_provider, &pending_texts)?;
+        if fresh_embeddings.len() != pending_indices.len() {
+            return Err(IngestError::Embedding(EmbeddingError::ProviderFailure {
+                provider: "pipeline",
+                message: format!(
+                    "embedding batch size mismatch: expected={}, actual={}",
+                    pending_indices.len(),
+                    fresh_embeddings.len()
+                ),
+            }));
+        }
+
+        for (chunk_index, embedding) in pending_indices
+            .into_iter()
+            .zip(fresh_embeddings.into_iter())
+        {
+            if embedding.len() != self.embedding_provider.dimension() {
+                return Err(IngestError::Embedding(EmbeddingError::DimensionMismatch {
+                    expected: self.embedding_provider.dimension(),
+                    actual: embedding.len(),
+                }));
+            }
+
+            self.repository.put_cached_embedding(
+                namespace,
+                &chunks[chunk_index].content_hash,
+                self.embedding_provider.model_id(),
+                &embedding,
+            )?;
+            embeddings[chunk_index] = embedding;
+        }
+
+        Ok(embeddings)
+    }
 }
 
 fn validate_request(request: &IngestRequest) -> Result<(), IngestError> {
@@ -573,6 +638,11 @@ fn embed_texts<P: EmbeddingProvider + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
     use rusqlite::Connection;
 
     use super::{DedupMode, IngestPipeline, IngestRequest};
@@ -736,6 +806,35 @@ mod tests {
         assert_eq!(hits[0].chunk_id, second.chunk_ids[0]);
     }
 
+    #[test]
+    fn reuses_cached_embeddings_for_duplicate_chunk_content() {
+        let mut repository = repository_with_schema();
+        let provider = CountingEmbeddingProvider::new(4);
+        let mut index = InMemoryVectorIndex::new(4);
+
+        let mut first_request = IngestRequest::new("cached duplicate body");
+        first_request.filename = "first.txt".to_owned();
+
+        let mut first_pipeline = IngestPipeline::new(&mut repository, &provider, &mut index);
+        first_pipeline.ingest(first_request).expect("first ingest");
+        assert_eq!(provider.embed_batch_calls(), 1);
+
+        let mut second_request = IngestRequest::new("cached duplicate body");
+        second_request.filename = "second.txt".to_owned();
+        second_request.options.dedup_mode = DedupMode::Allow;
+
+        let mut second_pipeline = IngestPipeline::new(&mut repository, &provider, &mut index);
+        second_pipeline
+            .ingest(second_request)
+            .expect("second ingest");
+
+        assert_eq!(
+            provider.embed_batch_calls(),
+            1,
+            "second ingest should reuse embedding_cache instead of calling provider again"
+        );
+    }
+
     #[derive(Debug)]
     struct FailingIndex {
         dimension: usize,
@@ -770,6 +869,51 @@ mod tests {
 
         fn rebuild(&mut self, _entries: &[IndexEntry]) -> IndexResult<()> {
             Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct CountingEmbeddingProvider {
+        inner: StubEmbeddingProvider,
+        embed_batch_calls: Arc<AtomicUsize>,
+    }
+
+    impl CountingEmbeddingProvider {
+        fn new(dimension: usize) -> Self {
+            Self {
+                inner: StubEmbeddingProvider::from_dimension(dimension).expect("stub provider"),
+                embed_batch_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn embed_batch_calls(&self) -> usize {
+            self.embed_batch_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    impl EmbeddingProvider for CountingEmbeddingProvider {
+        fn embed(&self, text: &str) -> crate::embedding::EmbeddingResult<Vec<f32>> {
+            self.inner.embed(text)
+        }
+
+        fn embed_batch(
+            &self,
+            texts: &[String],
+        ) -> crate::embedding::EmbeddingResult<Vec<Vec<f32>>> {
+            self.embed_batch_calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.embed_batch(texts)
+        }
+
+        fn model_id(&self) -> &str {
+            self.inner.model_id()
+        }
+
+        fn dimension(&self) -> usize {
+            self.inner.dimension()
+        }
+
+        fn max_batch_size(&self) -> usize {
+            self.inner.max_batch_size()
         }
     }
 }
