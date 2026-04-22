@@ -1,1330 +1,457 @@
-# Seahorse 战略级落地方案（最终融合版）
-
-## 新一代认知记忆引擎 —— 让 AI Agent 拥有类人记忆
-
----
-
-## 〇、Executive Summary
-
-**一句话定位：** Seahorse 是全球首个将神经科学启发的动态记忆机制原生融入 RAG 架构的生产级 AI Agent 认知记忆引擎。
-
-**核心价值主张：**
-
-- **从被动检索到主动涌现**：突破传统向量数据库的静态 Top-K 范式，实现联想式记忆召回
-- **从扁平空间到认知拓扑**：通过脉冲神经网络和语义引力场构建多层次记忆组织
-- **从单次查询到持续演化**：记忆系统随使用自适应优化，越用越智能
-
-**战略差异化壁垒：**
-
-| 维度 | 传统方案 | Seahorse |
-|------|----------|----------|
-| 检索范式 | 余弦相似度 Top-K | LIF 脉冲扩散 + Tide 能量分解 + 语义引力场 |
-| 记忆结构 | 扁平向量空间 | Tag 共现拓扑 + 多跳联想网络 + 世界观分区 |
-| 意图理解 | 单向量匹配 | Gram-Schmidt 多层能量剥离 + 投影熵分析 |
-| 记忆演化 | 静态索引 | 突触可塑性 + 梦境整合 + 自适应压缩 |
-| 弱信号捕获 | 无 | 残差空间挖掘被掩盖的隐含记忆 |
-| 部署形态 | 云服务 / Python 库 | Rust 核心 + 多语言 SDK + WASM + 嵌入式 |
-
-**18 个月战略目标：**
-
-1. **协议层**：成为 AI Agent 记忆交互的事实标准（MCP 集成）
-2. **引擎层**：达到百万级向量、毫秒级检索的生产性能
-3. **生态层**：集成主流 Agent 框架（LangChain/LlamaIndex/CrewAI），建立记忆市场
-
----
-
-## 一、战略架构：仿脑三层认知模型
-
-### 1.1 全局架构视图
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Layer 3: 生态协议层                            │
-│  ┌──────────────┬──────────────┬──────────────┬──────────────┐  │
-│  │ MCP Protocol │ LangChain    │ Agent        │ Memory       │  │
-│  │ Server       │ Integration  │ Frameworks   │ Marketplace  │  │
-│  └──────────────┴──────────────┴──────────────┴──────────────┘  │
-└────────────────────────────┬────────────────────────────────────┘
-                             │
-┌────────────────────────────┴────────────────────────────────────┐
-│                    Layer 2: 接口抽象层                            │
-│  ┌──────────────┬──────────────┬──────────────┬──────────────┐  │
-│  │ Python SDK   │ Node.js      │ REST/gRPC    │ WASM         │  │
-│  │ (PyO3)       │ (napi-rs)    │ (axum)       │ Browser      │  │
-│  └──────────────┴──────────────┴──────────────┴──────────────┘  │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ FFI Bridge (零开销抽象)
-┌────────────────────────────┴────────────────────────────────────┐
-│                Layer 1: 认知内核层 (Pure Rust)                    │
-│                                                                   │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │              Cerebral Cortex (大脑皮层)                     │  │
-│  │        向量空间管理 + 增强型 HNSW 索引                       │  │
-│  │  • mmap 持久化  • 动态量化  • 引力场辅助路由                │  │
-│  └───────────────┬──────────────┬────────────────────────────┘  │
-│                  │              │                                │
-│  ┌───────────────▼──────────────▼────────────────────────────┐  │
-│  │              Synaptic Network (突触网络)                    │  │
-│  │        LIF 脉冲扩散引擎 + Tag 共现拓扑                        │  │
-│  │  • 多跳联想  • 涌现模式检测  • 传播控制  • STDP 可塑性     │  │
-│  └───────────────┬──────────────────────────────────────────┘  │
-│                  │                                                │
-│  ┌───────────────▼──────────────────────────────────────────┐  │
-│  │              Thalamic Gate (丘脑门控)                      │  │
-│  │        Tide 算法引擎 + 意图理解                              │  │
-│  │  • Gram-Schmidt 能量分解  • 投影熵  • 世界观分类  • 去重   │  │
-│  └───────────────┬──────────────────────────────────────────┘  │
-│                  │                                                │
-│  ┌───────────────▼──────────────────────────────────────────┐  │
-│  │              Hippocampus (海马体)                           │  │
-│  │        统一存储引擎 (SQLite + mmap + WAL)                   │  │
-│  │  • Schema 管理  • 事务支持  • 增量备份  • 迁移工具         │  │
-│  └───────────────┬──────────────────────────────────────────┘  │
-│                  │                                                │
-│  ┌───────────────▼──────────────────────────────────────────┐  │
-│  │              Cerebellum (小脑)                              │  │
-│  │        后台任务调度引擎                                      │  │
-│  │  • 梦境整合  • 记忆压缩  • 拓扑维护  • 健康分析            │  │
-│  └──────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────┘
-```
-
-### 1.2 仿脑命名的架构约束
-
-**设计哲学：** 每个“脑区”组件严格遵守单一职责原则，边界清晰，不可越权。
-
-| 脑区组件 | 生物类比 | 职责边界 | 禁止行为 |
-|---------|---------|---------|---------|
-| **Cortex** | 大脑皮层 | 向量空间表示、HNSW 图管理、距离计算 | ❌ 不处理 Tag 拓扑关系 |
-| **Synapse** | 突触网络 | LIF 脉冲传导、共现矩阵维护、多跳扩散 | ❌ 不做向量检索 |
-| **Thalamus** | 丘脑 | 信号门控、能量分解、意图路由 | ❌ 不存储状态 |
-| **Hippocampus** | 海马体 | 持久化存储、事务管理、Schema 演化 | ❌ 不做计算 |
-| **Cerebellum** | 小脑 | 异步任务调度、后台优化 | ❌ 不阻塞主路径 |
-
----
-
-## 二、技术栈选型矩阵（最终版）
-
-```
-┌──────────────┬────────────────────┬──────────────┬─────────────────────────┐
-│   技术维度    │      首选方案       │   备选方案    │       决策理由            │
-├──────────────┼────────────────────┼──────────────┼─────────────────────────┤
-│ 核心语言      │ Rust 2021 Edition  │ -            │ 零成本抽象+内存安全+性能   │
-│ 向量索引      │ 自实现 HNSW         │ usearch      │ 深度定制 LIF 层+引力场路由   │
-│ 线性代数      │ nalgebra 0.33      │ faer         │ 泛型维度+no_std+成熟生态  │
-│ 稀疏矩阵      │ sprs 0.11          │ sparse-mats  │ CSR 格式成熟+文档完善      │
-│ 持久化        │ SQLite (rusqlite)  │ redb/sled    │ 生态成熟+跨平台+ACID      │
-│ 序列化        │ rkyv (零拷贝)      │ bincode      │ mmap 场景关键+极致性能     │
-│ 异步运行时    │ tokio 1.x          │ async-std    │ 生态统一+tower 集成        │
-│ Python 绑定   │ PyO3 0.22+         │ cffi         │ 类型安全+异步支持+性能    │
-│ Node.js 绑定  │ napi-rs 3.x        │ ffi-napi     │ N-API 稳定+TS 支持        │
-│ WASM 编译     │ wasm-bindgen       │ wasm-pack    │ 浏览器端记忆+隐私计算     │
-│ HTTP 框架     │ axum 0.7           │ actix-web    │ tokio 原生+类型安全路由    │
-│ gRPC          │ tonic              │ grpc-rs      │ async/await 原生+生态好    │
-│ 可观测性      │ tracing + metrics  │ opentelemetry│ 结构化日志+Prometheus 兼容 │
-│ 测试框架      │ cargo-nextest      │ cargo-test   │ 并行测试+更好输出         │
-│ 性能基准      │ criterion + divan  │ -            │ 统计严谨+微基准支持       │
-│ 向量化        │ wide (SIMD)        │ std::simd    │ 稳定+跨平台               │
-│ 嵌入式 C-API  │ cbindgen           │ bindgen      │ 自动生成头文件+无运行时   │
-└──────────────┴────────────────────┴──────────────┴─────────────────────────┘
-```
-
----
-
-## 三、认知内核详细设计（落地版）
-
-### 3.1 Cortex：增强型 HNSW
-
-**核心职责：**
-- 负责向量检索主路径
-- 支持 LIF/引力场上下文修正距离
-- 支持 mmap + rkyv 零拷贝持久化
-
-**关键设计要点：**
-1. **动态边权重**：边权重由距离、共现强度、访问时间衰减、LIF 电位影响共同决定。
-2. **检索路径可注入上下文**：`lif_states` 与 `gravity_field` 均可影响路径选择与排序。
-3. **持久化不可阻塞**：写入时采用异步快照与增量落盘，避免阻塞主检索。
-
-**实现约束：**
-- 数据结构必须可序列化为 rkyv
-- 向量距离计算必须统一入口，避免多处数值误差
-
-**关键数据结构（示意）：**
-```rust
-struct HnswGraph {
-    layers: Vec<Layer>,
-    vectors: HashMap<NodeId, VectorEntry>,
-    node_levels: HashMap<NodeId, usize>,
-    entry_point: Option<NodeId>,
-    config: HnswConfig,
-}
-
-struct Edge {
-    target: NodeId,
-    base_distance: f32,
-    cooccur_strength: f32,
-    lif_affinity: f32,
-    recency_factor: f32,
-    last_traversed: i64,
-}
-
-impl Edge {
-    fn effective_distance(&self, lif: Option<f32>) -> f32 {
-        let mut dist = self.base_distance;
-        dist *= 1.0 / (1.0 + 0.5 * self.cooccur_strength);
-        if let Some(p) = lif {
-            dist *= 1.0 - 0.3 * p.max(0.0).min(1.0);
-        }
-        dist * self.recency_factor
-    }
-}
-```
-
-**检索路径修正公式（统一入口）：**
-```
-距离' = distance × (1 - α×LIF_potential) × gravity_weight × recency_factor
-```
-
-**持久化策略细节：**
-- HNSW 图结构 → rkyv 序列化 → mmap 文件
-- 写入流程：内存更新 → 异步快照 → mmap 原子替换
-- 读流程：mmap 映射 → rkyv 校验 → 直接访问归档数据
-
----
-
-### 3.2 Synapse：LIF 脉冲扩散引擎
-
-**核心职责：**
-- 基于 Tag 共现拓扑进行联想扩散
-- 提供多跳检索与涌现模式识别
-- 控制扩散规模，避免雪崩式激活
-
-**完整流程：**
-1. **种子识别**：query 向量投影到 Tag 质心 → Top-K 作为种子
-2. **脉冲扩散**：按 hop 扩散，电位衰减
-3. **收敛检测**：激活数量变化率低于阈值即停止
-4. **全局抑制**：激活过多则整体衰减
-5. **涌现模式检测**：无直接边但被激活的 Tag 组合被标记为 emergent
-
-**实现约束：**
-- 必须记录 SpikeTrace（用于可视化与可调优）
-- 每次传播后必须更新可塑性统计
-
-**关键数据结构（示意）：**
-```rust
-pub struct LIFNeuron {
-    pub tag_id: TagId,
-    pub v: f32,
-    pub v_rest: f32,
-    pub v_threshold: f32,
-    pub v_reset: f32,
-    pub tau_m: f32,
-    pub tau_syn: f32,
-    pub in_refractory: bool,
-    pub t_ref: f32,
-    pub t_ref_remaining: f32,
-    pub total_spikes: u64,
-    pub last_spike_time: f64,
-    pub activity_ema: f32,
-}
-
-pub struct Connectome {
-    adjacency: CsMat<f32>,
-    tag_to_idx: HashMap<TagId, usize>,
-    idx_to_tag: Vec<TagId>,
-    total_events: u64,
-}
-```
-
-**传播控制细节：**
-- 逐跳衰减：`decay = hop_decay^hop`
-- 传播门限：`edge_weight >= similarity_gate`
-- 收敛条件：窗口内激活数量方差 / 均值 < 阈值
-- 全局抑制：活跃神经元数 > max_active 时统一衰减电位
-
-**共现矩阵更新：**
-- 共现权重 = 旧值×衰减 + 新增权重
-- 仅保留上三角落盘，恢复时对称展开
-- 定期剪枝：移除低于 min_weight 的边
-
----
-
-### 3.3 Thalamus：Tide 算法引擎
-
-**核心职责：**
-- 通过 Gram-Schmidt 分解剥离主语义
-- 通过投影熵判断意图聚焦程度
-- 通过世界观门控调整检索参数
-- 通过引力场重塑 query
-
-**关键环节：**
-1. **能量分解（MGS）**：避免数值不稳定
-2. **投影熵**：输出 FocusLevel
-3. **世界观门控**：分类后动态调整参数
-4. **弱信号捕获**：在残差空间挖掘被掩盖语义
-
-**实现约束：**
-- 分解层数必须限制（默认 5）
-- 残差能量阈值要有硬保护
-
-**分解流程细节：**
-```
-query → 残差 r0
-for each layer:
-  找到与残差最相似的 tag 向量 t
-  projection = proj(r, t)
-  residual = r - projection
-  记录该层能量占比
-  若 residual_energy / initial_energy < threshold → stop
-```
-
-**投影熵计算：**
-```
-projections = [|cos(q, tag_i)|]
-probs = projections / sum(projections)
-entropy = -Σ p_i ln p_i
-normalized = entropy / ln(N)
-```
-
-**世界观门控参数调整规则（示例）：**
-- Technical：提高相似度阈值、降低扩散 hop
-- Emotional：降低阈值、增加 hop、允许弱信号
-- Creative：最大化探索、扩大 max_results
-
-**语义引力场细节：**
-- 质量 = sqrt(doc_count) × avg_cooccur × recency_factor
-- 半径 = 0.3 + 0.1×ln(mass)
-- 力 = G × mass / distance^n
-
----
-
-### 3.4 RetrievalPipeline：全链路检索管线
-
-**管线阶段：**
-1. Query Embedding
-2. Thalamus 分析（worldview + entropy）
-3. Cortex 过召回（引力场修正）
-4. Tide 弱信号补充
-5. LIF 脉冲扩散补充
-6. 语义去重 + 引力坍缩再排序
-
-**重要约束：**
-- 所有高级检索模式必须可降级为 Basic
-- 主路径最大延迟必须有上限策略（超时回退）
-
-**检索模式定义：**
-- Basic：仅向量 Top-K
-- Tide：向量 + 能量分解 + 弱信号
-- TagMemo：Tide + LIF 脉冲扩散
-- Dream：扩大 hop + 结果数 + 低阈值
-
-**结果融合策略：**
-- Cortex/WeakSignal/Spike 统一进入候选池
-- Dedup 先于重排，防止重复分数放大
-- 引力坍缩只调整 score，不改来源标记
-
-**结果来源标识：**
-- Vector
-- WeakSignal
-- SpikeAssociation { hop, pathway }
-
----
-
-## 四、写入链路与数据生命周期
-
-### 4.1 Ingest 全流程
-
-Seahorse 的写入链路必须与检索链路同等重要。系统不仅要能“想起来”，还必须能稳定地“记进去、改得动、删得掉、可恢复”。
-
-**标准写入流程：**
-1. **输入接收**：接收原始文本、文件、对话或结构化记忆对象
-2. **预处理**：清洗文本、标准化换行、去除无意义控制字符、计算内容哈希
-3. **Chunk 切分**：按 token/语义边界切分为 chunk
-4. **Embedding 生成**：调用 EmbeddingProvider 批量生成向量
-5. **Tag 提取**：规则 + LLM + 用户显式标签融合
-6. **Tag 规范化**：别名归一、同义词映射、类别补全、停用词过滤
-7. **SQLite 事务写入**：写 files / chunks / tags / chunk_tags
-8. **向量索引更新**：将 chunk embedding 插入 HNSW
-9. **Connectome 更新**：基于 chunk 的 tag 集合更新共现矩阵
-10. **Neuron State 更新**：初始化缺失神经元，更新使用统计
-11. **异步快照**：根据策略刷新 mmap 快照
-12. **审计日志**：记录 ingest 结果、耗时、失败原因
-
-**事务策略：**
-- `files/chunks/tags/chunk_tags/retrieval_log` 必须在同一 SQLite 事务中提交
-- HNSW 与 Connectome 更新可采用“事务提交后异步更新”模式
-- 若异步更新失败，必须记录 repair task，保证后台可重建
-
-**失败回滚策略：**
-- SQLite 事务失败 → 全量回滚
-- 向量索引失败但 SQLite 成功 → 标记 `index_status = pending_repair`
-- Connectome 更新失败 → 标记 `connectome_status = pending_repair`
-- 系统启动时自动扫描 repair queue
-
-### 4.2 Chunk 切分策略
-
-**切分原则：**
-- 优先保持语义完整，其次控制 token 长度
-- 默认 chunk 大小：`300~800 tokens`
-- 默认 overlap：`50~100 tokens`
-- 对话类数据按轮次切分；文档类数据按段落/标题层级切分
-
-**切分模式：**
-- `FixedToken`：按固定 token 切分
-- `SemanticParagraph`：按段落与标题边界切分
-- `DialogueTurn`：按对话轮次切分
-- `Custom`：允许上层传入切分器
-
-### 4.3 Update / Forget / Delete 生命周期
-
-**删除策略采用 Tombstone + 延迟压缩：**
-- 业务删除不立即重建 HNSW
-- 被删除 chunk 标记 `deleted_at` 与 `is_deleted = true`
-- 查询阶段跳过 tombstone
-- 达到阈值后触发 compaction/rebuild
-
-**删除后的级联行为：**
-1. chunk 标记删除
-2. chunk_tags 失效
-3. HNSW 标记删除节点
-4. connectome 不立即反向扣减，采用“时间衰减 + 周期性重建”策略
-5. tag 质心在后台重算
-
-**忘记（Forget）模式：**
-- `SoftForget`：逻辑删除，可恢复
-- `HardForget`：彻底删除 chunk 与索引记录
-- `DecayForget`：降低相关边权与访问权重，不立即删除
-
-### 4.4 Reindex / Repair / Rebuild
-
-**触发场景：**
-- 索引损坏
-- embedding 模型升级
-- tombstone 比例过高
-- repair queue 积压
-- schema / archive version 升级
-
-**重建顺序：**
-1. 从 SQLite 扫描有效 chunks
-2. 重新生成或加载 embedding
-3. 重建 HNSW
-4. 重建 tag centroid
-5. 重建 connectome
-6. 重新归档 mmap
-
----
-
-## 五、Tag 与 Embedding 体系
-
-### 5.1 Tag 体系设计
-
-Tag 是 Seahorse 的核心语义桥梁，直接连接：
-- Cortex 的结果解释
-- Synapse 的扩散网络
-- Thalamus 的分解与门控
-
-**Tag 来源：**
-- 用户显式传入
-- 规则提取（正则/关键词/metadata）
-- LLM 自动提取
-- 离线批处理补标
-
-**Tag 分类建议：**
-- `core`：系统核心标签，跨领域复用
-- `domain`：专业领域标签
-- `temporal`：时间相关标签
-- `entity`：人名/组织/地点
-- `emotional`：情绪与关系
-- `custom`：用户自定义
-
-### 5.2 Tag 规范化
-
-**规范化流程：**
-1. trim + 小写归一（必要时保留展示名）
-2. 同义词映射
-3. 别名表合并
-4. 停用 tag 过滤
-5. category 推断或补全
-6. 去重与 confidence 合并
-
-**需要额外维护的表：**
-- `tag_aliases(alias, canonical_tag_id)`
-- `tag_synonyms(tag_id, synonym)`
-- `tag_stopwords(word)`
-
-### 5.3 Tag 质心（Centroid）
-
-**定义：**
-Tag 质心向量为其关联 chunk embedding 的加权均值。
-
-**推荐加权公式：**
-```text
-centroid(tag) = Σ (embedding_i × confidence_i × recency_i) / Σ (confidence_i × recency_i)
-```
-
-**更新策略：**
-- 小规模写入：增量更新
-- 大规模删除/重构：批量重算
-- 默认按时间衰减加权，避免旧记忆长期主导
-
-### 5.4 EmbeddingProvider 抽象
-
-**核心接口要求：**
-- `embed(text: &str) -> Vec<f32>`
-- `embed_batch(texts: &[String]) -> Vec<Vec<f32>>`
-- `dimension() -> usize`
-- `model_id() -> String`
-- `max_batch_size() -> usize`
-
-**工程约束：**
-- 同一 memory namespace 默认只能存在一种主 embedding 维度
-- 不同模型升级时必须触发 re-embed 或建立新 index version
-- 所有 embedding 必须附带 `model_id` 与 `dimension`
-
-### 5.5 Embedding 缓存与迁移
-
-**缓存：**
-- key = `hash(text + model_id)`
-- 支持内存 LRU + SQLite 持久缓存
-- 批量请求优先合并
-
-**迁移策略：**
-- 新模型引入后创建新 index version
-- 老版本维持只读，直到 rebuild 完成
-- 切换采用“双索引切换”而非原地覆盖
-
----
-
-## 六、接口契约与结果模型
-
-### 6.1 核心结果对象
-
-```rust
-pub struct RecallResultItem {
-    pub chunk_id: i64,
-    pub vector_id: String,
-    pub chunk_text: String,
-    pub source_file: Option<String>,
-    pub tags: Vec<String>,
-    pub score: f32,
-    pub source_type: ResultSource,
-    pub hop_distance: Option<usize>,
-    pub spike_pathway: Option<Vec<String>>,
-    pub weak_signal_strength: Option<f32>,
-    pub metadata: HashMap<String, String>,
-}
-```
-
-### 6.2 ResultSource 统一定义
-
-```rust
-pub enum ResultSource {
-    Vector,
-    WeakSignal,
-    SpikeAssociation { hop: usize, pathway: Vec<TagId> },
-}
-```
-
-### 6.3 最终排序公式
-
-```text
-final_score =
-  w_vector * vector_score +
-  w_spike * spike_score +
-  w_weak * weak_signal_score +
-  w_gravity * gravity_bonus -
-  w_dup * duplication_penalty
-```
-
-**建议默认权重：**
-- Basic：`1.0 / 0 / 0 / 0.05 / 0.2`
-- Tide：`0.75 / 0 / 0.2 / 0.1 / 0.2`
-- TagMemo：`0.55 / 0.25 / 0.1 / 0.1 / 0.2`
-- Dream：`0.4 / 0.3 / 0.15 / 0.15 / 0.15`
-
-### 6.4 Rust Core API
-
-```rust
-Engine::open(path)
-Engine::ingest_text(input)
-Engine::ingest_chunks(input)
-Engine::recall(query, mode, params)
-Engine::forget(filter)
-Engine::dream(options)
-Engine::stats()
-Engine::rebuild_index()
-Engine::compact()
-```
-
-### 6.5 REST API
-
-- `POST /ingest`
-- `POST /recall`
-- `POST /forget`
-- `POST /dream`
-- `GET /stats`
-- `GET /health`
-- `POST /admin/rebuild`
-
-### 6.6 错误码体系
-
-- `INVALID_INPUT`
-- `EMBEDDING_FAILED`
-- `INDEX_UNAVAILABLE`
-- `STORAGE_ERROR`
-- `TIMEOUT`
-- `PARTIAL_RESULT`
-- `UNSUPPORTED_MODEL_VERSION`
-
----
-
-## 七、后台任务与维护策略
-
-### 7.1 Cerebellum 调度模型
-
-**任务类型：**
-- RebuildIndex
-- RepairPendingIndex
-- RecomputeCentroids
-- PruneConnectome
-- CompactMemory
-- DreamRun
-- HealthAnalyze
-
-**调度要求：**
-- 支持优先级
-- 支持重试与指数退避
-- 支持幂等任务签名
-- 禁止阻塞 recall 主路径
-
-### 7.2 Dream 模式
-
-**Dream 目标：**
-- 不是生成幻想文本，而是做“离线联想整合”
-- 可选接入 LLM 生成 dream narrative，但默认不开启自动写回
-
-**Dream 流程：**
-1. 随机或基于访问热度选取种子
-2. 放大 hop 与 max_results
-3. 运行深度联想检索
-4. 生成候选关联与摘要
-5. 默认进入 pending_review，不直接进入主记忆
-
-### 7.3 Memory Compaction
-
-**触发条件：**
-- tombstone 比例超阈值
-- 高相似 chunk 聚集
-- 冷数据比例上升
-
-**压缩原则：**
-- 压缩结果必须保留可追溯来源链
-- 原始记忆默认保留，可归档到冷存储
-
----
-
-## 八、配置、安全与多租户
-
-### 8.1 配置系统
-
-建议配置层级：
-1. 默认配置
-2. 配置文件（TOML）
-3. 环境变量覆盖
-4. 运行时参数覆盖
-
-**配置域：**
-- storage
-- embedding
-- hnsw
-- synapse
-- thalamus
-- pipeline
-- observability
-- security
-
-### 8.2 多租户 / Namespace
-
-生产实现建议支持 namespace：
-- 每个 namespace 独立逻辑空间
-- SQLite 主表附带 `namespace_id`
-- HNSW / connectome 支持按 namespace 隔离
-- 不同 namespace 不共享 recall 结果
-
-### 8.3 安全要求
-
-- API 层必须鉴权
-- 生产环境支持 SQLite 文件级加密或磁盘加密
-- 支持 PII 清洗/脱敏写入策略
-- 记录审计日志
-- Recall 前可选安全过滤，防止恶意记忆被优先召回
-
----
-
-## 九、测试、评测与迁移策略
-
-### 9.1 测试矩阵
-
-**单元测试：**
-- 距离计算
-- HNSW 插入/搜索
-- LIF 动力学
-- Gram-Schmidt 正交性
-- 投影熵
-- 引力场变形
-
-**集成测试：**
-- ingest → recall
-- delete → recall
-- rebuild → recover
-- sqlite + mmap 一致性
-
-**端到端测试：**
-- Python SDK → Rust Core → SQLite
-- REST → recall → result source correctness
-
-### 9.2 评测指标
-
-- Recall@K
-- MRR
-- nDCG
-- Latency P50/P95/P99
-- Cold Start
-- Memory Footprint
-- Connectome Density
-- Active Neuron Percentage
-
-### 9.3 数据集设计
-
-- 合成数据集（可控验证）
-- 小规模真实文档集
-- 跨域联想测试集
-- 弱信号测试集
-- 多轮对话长期记忆测试集
-
-### 9.4 迁移与版本兼容
-
-**必须跟踪的版本：**
-- schema version
-- mmap archive version
-- embedding model version
-- index format version
-
-**迁移原则：**
-- 向后兼容优先
-- 不兼容变更走 rebuild
-- 大版本切换使用双索引切换
-
----
-
-## 九、测试、评测与迁移策略
-
-### 9.1 测试矩阵
-
-**单元测试：**
-- 距离计算
-- HNSW 插入/搜索
-- LIF 动力学
-- Gram-Schmidt 正交性
-- 投影熵
-- 引力场变形
-
-**集成测试：**
-- ingest → recall
-- delete → recall
-- rebuild → recover
-- sqlite + mmap 一致性
-
-**端到端测试：**
-- Python SDK → Rust Core → SQLite
-- REST → recall → result source correctness
-
-### 9.2 评测指标
-
-- Recall@K
-- MRR
-- nDCG
-- Latency P50/P95/P99
-- Cold Start
-- Memory Footprint
-- Connectome Density
-- Active Neuron Percentage
-
-### 9.3 数据集设计
-
-- 合成数据集（可控验证）
-- 小规模真实文档集
-- 跨域联想测试集
-- 弱信号测试集
-- 多轮对话长期记忆测试集
-
-### 9.4 迁移与版本兼容
-
-**必须跟踪的版本：**
-- schema version
-- mmap archive version
-- embedding model version
-- index format version
-
-**迁移原则：**
-- 向后兼容优先
-- 不兼容变更走 rebuild
-- 大版本切换使用双索引切换
-
----
-
-## 十、数据库 Schema（完整建议版）
-
-```sql
-CREATE TABLE IF NOT EXISTS namespaces (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL UNIQUE,
-    description TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS files (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    namespace_id INTEGER NOT NULL REFERENCES namespaces(id),
-    filename TEXT NOT NULL,
-    file_type TEXT NOT NULL,
-    file_hash TEXT,
-    total_chunks INTEGER DEFAULT 0,
-    ingest_status TEXT DEFAULT 'completed',
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(namespace_id, filename)
-);
-
-CREATE TABLE IF NOT EXISTS chunks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    namespace_id INTEGER NOT NULL REFERENCES namespaces(id),
-    file_id INTEGER REFERENCES files(id),
-    chunk_index INTEGER NOT NULL,
-    chunk_text TEXT NOT NULL,
-    content_hash TEXT NOT NULL,
-    embedding_id TEXT,
-    token_count INTEGER,
-    model_id TEXT,
-    dimension INTEGER,
-    is_deleted INTEGER DEFAULT 0,
-    deleted_at DATETIME,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(namespace_id, content_hash)
-);
-
-CREATE TABLE IF NOT EXISTS tags (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    namespace_id INTEGER NOT NULL REFERENCES namespaces(id),
-    name TEXT NOT NULL,
-    normalized_name TEXT NOT NULL,
-    category TEXT,
-    usage_count INTEGER DEFAULT 0,
-    last_used_at DATETIME,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(namespace_id, normalized_name)
-);
-
-CREATE TABLE IF NOT EXISTS chunk_tags (
-    chunk_id INTEGER NOT NULL REFERENCES chunks(id),
-    tag_id INTEGER NOT NULL REFERENCES tags(id),
-    confidence REAL DEFAULT 1.0,
-    source TEXT DEFAULT 'auto',
-    PRIMARY KEY (chunk_id, tag_id)
-);
-
-CREATE TABLE IF NOT EXISTS tag_aliases (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    namespace_id INTEGER NOT NULL REFERENCES namespaces(id),
-    alias TEXT NOT NULL,
-    canonical_tag_id INTEGER NOT NULL REFERENCES tags(id),
-    UNIQUE(namespace_id, alias)
-);
-
-CREATE TABLE IF NOT EXISTS connectome (
-    namespace_id INTEGER NOT NULL REFERENCES namespaces(id),
-    tag_i INTEGER NOT NULL REFERENCES tags(id),
-    tag_j INTEGER NOT NULL REFERENCES tags(id),
-    weight REAL NOT NULL,
-    cooccur_count INTEGER DEFAULT 1,
-    last_updated DATETIME DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (namespace_id, tag_i, tag_j)
-);
-
-CREATE TABLE IF NOT EXISTS neuron_states (
-    namespace_id INTEGER NOT NULL REFERENCES namespaces(id),
-    tag_id INTEGER NOT NULL REFERENCES tags(id),
-    threshold REAL NOT NULL DEFAULT 1.0,
-    tau_membrane REAL NOT NULL DEFAULT 20.0,
-    tau_synaptic REAL NOT NULL DEFAULT 5.0,
-    refractory_period REAL NOT NULL DEFAULT 2.0,
-    total_spikes INTEGER NOT NULL DEFAULT 0,
-    last_spike_time REAL,
-    activity_ema REAL NOT NULL DEFAULT 0.0,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (namespace_id, tag_id)
-);
-
-CREATE TABLE IF NOT EXISTS embedding_cache (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    namespace_id INTEGER NOT NULL REFERENCES namespaces(id),
-    content_hash TEXT NOT NULL,
-    model_id TEXT NOT NULL,
-    dimension INTEGER NOT NULL,
-    vector_blob BLOB NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(namespace_id, content_hash, model_id)
-);
-
-CREATE TABLE IF NOT EXISTS retrieval_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    namespace_id INTEGER NOT NULL REFERENCES namespaces(id),
-    query_text TEXT,
-    query_hash TEXT,
-    mode TEXT NOT NULL,
-    worldview TEXT,
-    entropy REAL,
-    result_count INTEGER,
-    total_time_us INTEGER,
-    spike_depth INTEGER,
-    emergent_count INTEGER,
-    params_snapshot TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS repair_queue (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    namespace_id INTEGER NOT NULL REFERENCES namespaces(id),
-    task_type TEXT NOT NULL,
-    payload TEXT,
-    status TEXT DEFAULT 'pending',
-    retry_count INTEGER DEFAULT 0,
-    last_error TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS schema_meta (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_chunks_namespace_file ON chunks(namespace_id, file_id);
-CREATE INDEX IF NOT EXISTS idx_chunks_deleted ON chunks(namespace_id, is_deleted);
-CREATE INDEX IF NOT EXISTS idx_tags_namespace_name ON tags(namespace_id, normalized_name);
-CREATE INDEX IF NOT EXISTS idx_chunk_tags_tag ON chunk_tags(tag_id);
-CREATE INDEX IF NOT EXISTS idx_connectome_tag_i ON connectome(namespace_id, tag_i);
-CREATE INDEX IF NOT EXISTS idx_connectome_tag_j ON connectome(namespace_id, tag_j);
-CREATE INDEX IF NOT EXISTS idx_retrieval_log_time ON retrieval_log(namespace_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_repair_queue_status ON repair_queue(namespace_id, status);
-```
-
----
-
-## 十一、Rust Crate 级模块职责与接口边界
-
-### 11.1 Workspace 结构
-
-```text
-seahorse/
-├── crates/
-│   ├── seahorse-core/
-│   ├── seahorse-server/
-│   ├── seahorse-cli/
-│   └── seahorse-mcp/
-├── bindings/
-│   ├── python/
-│   ├── node/
-│   └── wasm/
-├── proto/
-├── tests/
-├── benchmarks/
-└── docs/
-```
-
-### 11.2 `seahorse-core` 模块划分
-
-- `config/`：配置加载、校验、默认值
-- `types/`：公共类型定义
-- `embedding/`：EmbeddingProvider 抽象与后端实现
-- `cortex/`：HNSW、距离计算、量化、持久化
-- `synapse/`：LIF 神经元、connectome、spike engine、plasticity
-- `thalamus/`：energy decomposer、projection entropy、worldview gate、gravity field、dedup
-- `hippocampus/`：SQLite schema、repository、migration、repair queue
-- `cerebellum/`：scheduler、dream、compaction、analytics
-- `pipeline/`：统一 recall / ingest orchestration
-- `observability/`：metrics、tracing、health report
-- `security/`：PII 过滤、recall 安全过滤、审计
-
-### 11.3 核心 trait 定义建议
-
-```rust
-pub trait EmbeddingProvider {
-    fn model_id(&self) -> &str;
-    fn dimension(&self) -> usize;
-    fn embed(&self, text: &str) -> Result<Vec<f32>>;
-    fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
-}
-
-pub trait Chunker {
-    fn chunk(&self, text: &str) -> Result<Vec<ChunkDraft>>;
-}
-
-pub trait TagExtractor {
-    fn extract(&self, input: &TagExtractionInput) -> Result<Vec<TagDraft>>;
-}
-
-pub trait Clock {
-    fn now_unix_ms(&self) -> i64;
-}
-```
-
-### 11.4 Engine 主入口
-
-```rust
-pub struct SeahorseEngine {
-    pub config: Arc<Config>,
-    pub cortex: Arc<RwLock<Cortex>>,
-    pub synapse: Arc<RwLock<SpikeEngine>>,
-    pub thalamus: Arc<Thalamus>,
-    pub hippocampus: Arc<Hippocampus>,
-    pub cerebellum: Arc<Cerebellum>,
-}
-```
-
----
-
-## 十二、REST / MCP 契约示例
-
-### 12.1 `POST /ingest`
-
-**请求：**
-```json
-{
-  "namespace": "default",
-  "source": {
-    "type": "text",
-    "filename": "notes.md"
-  },
-  "content": "今天在咖啡馆和小明讨论了 Rust 的所有权模型。",
-  "tags": ["rust", "咖啡", "小明"],
-  "options": {
-    "chunk_mode": "semantic",
-    "auto_tag": true,
-    "update_connectome": true
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "success": true,
-  "data": {
-    "file_id": 12,
-    "chunk_ids": [101, 102],
-    "tag_ids": [5, 9, 21],
-    "index_status": "completed"
-  },
-  "error": null
-}
-```
-
-### 12.2 `POST /recall`
-
-**请求：**
-```json
-{
-  "namespace": "default",
-  "query": "Rust 内存安全相关的讨论",
-  "mode": "tagmemo",
-  "max_results": 5,
-  "options": {
-    "enable_spike": true,
-    "enable_tide": true,
-    "enable_weak_signals": true,
-    "max_spike_hops": 3,
-    "debug": true
-  }
-}
-```
-
-**响应：**
-```json
-{
-  "success": true,
-  "data": {
-    "results": [
-      {
-        "chunk_id": 101,
-        "chunk_text": "今天在咖啡馆和小明讨论了 Rust 的所有权模型。",
-        "score": 0.91,
-        "tags": ["rust", "小明", "咖啡"],
-        "source_type": "Vector"
-      },
-      {
-        "chunk_id": 118,
-        "chunk_text": "小明推荐了一本关于编译器优化的书。",
-        "score": 0.76,
-        "tags": ["小明", "编译器"],
-        "source_type": "SpikeAssociation",
-        "hop_distance": 2,
-        "spike_pathway": ["rust", "小明", "编译器"]
-      }
-    ],
-    "metadata": {
-      "mode": "tagmemo",
-      "worldview": "technical",
-      "entropy": 0.34,
-      "latency_ms": 18
-    }
-  },
-  "error": null
-}
-```
-
-### 12.3 MCP Tool 语义
-
-建议最小工具集：
-- `recall`
-- `ingest`
-- `forget`
-- `dream`
-- `stats`
-- `topology`
-
----
-
-## 十三、参数默认值、范围与调优建议
-
-### 13.1 HNSW 参数
-
-| 参数 | 默认值 | 建议范围 | 说明 |
-|---|---:|---:|---|
-| `m` | 16 | 8~32 | 每层最大连接数 |
-| `m_max_0` | 32 | 16~64 | 底层最大连接数 |
-| `ef_construction` | 200 | 100~400 | 构建宽度 |
-| `ef_search` | 64 | 32~256 | 查询宽度 |
-
-### 13.2 LIF 参数
-
-| 参数 | 默认值 | 建议范围 | 说明 |
-|---|---:|---:|---|
-| `tau_m` | 20.0 | 10~50 | 膜时间常数 |
-| `tau_syn` | 5.0 | 2~20 | 突触时间常数 |
-| `threshold_base` | 1.0 | 0.5~2.0 | 基础阈值 |
-| `refractory_period` | 2.0 | 1~10 | 不应期 |
-| `hop_decay` | 0.7 | 0.4~0.9 | 逐跳衰减 |
-| `similarity_gate` | 0.1 | 0.05~0.5 | 传播门限 |
-| `max_active` | 50 | 20~500 | 最大激活神经元 |
-| `convergence_threshold` | 0.1 | 0.02~0.2 | 收敛阈值 |
-| `min_fire_potential` | 0.8 | 0.5~1.5 | 最小放电电位 |
-
-### 13.3 Tide 参数
-
-| 参数 | 默认值 | 建议范围 | 说明 |
-|---|---:|---:|---|
-| `max_layers` | 5 | 3~10 | 最大剥离层数 |
-| `residual_threshold` | 0.05 | 0.01~0.2 | 残差终止阈值 |
-| `min_variance_explained` | 0.01 | 0.005~0.05 | 最小解释方差 |
-| `gravity_strength` | 0.2 | 0.05~0.5 | 引力场强度 |
-| `gravity_decay_exponent` | 2.0 | 1.5~3.0 | 距离衰减指数 |
-
-### 13.4 调优建议
-
-- **技术知识库场景**：提高 `similarity_gate`，降低 `max_hops`
-- **个人长期记忆场景**：降低 `similarity_gate`，提高 `max_hops`
-- **创意联想场景**：提高 `gravity_strength` 与 `max_results`
-- **生产保守模式**：关闭 Dream 自动写回、限制 weak signal 权重
-
----
-
-## 十四、异常处理与降级策略矩阵
-
-| 场景 | 检测条件 | 降级行为 | 后续处理 |
-|---|---|---|---|
-| Embedding 服务超时 | 超过 provider timeout | 返回缓存 embedding 或拒绝 ingest | 写入告警日志 |
-| HNSW 不可用 | mmap 校验失败/索引为空 | fallback 到 SQLite 粗筛 + embedding 重算 | 加入 repair queue |
-| Connectome 损坏 | 载入失败/维度异常 | 关闭 spike propagation，仅走 Vector/Tide | 后台重建 connectome |
-| Worldview 低置信 | top1-top2 差值过低 | 关闭 worldview gate | 记录分类样本 |
-| Tide 数值异常 | residual NaN/Inf | 关闭 weak signal，继续 Basic/TagMemo | 记录异常样本 |
-| Spike 激活过载 | active > max_active | 立即全局抑制并截断 hop | 记录参数快照 |
-| 部分结果失败 | 某阶段失败 | 返回 `PARTIAL_RESULT` | 在 metadata 中标记失效阶段 |
-
-**统一原则：**
-- recall 优先可用性
-- ingest 优先一致性
-- 所有降级必须可观测
-
----
-
-## 十五、可执行开发顺序（最终建议）
-
-### Milestone A：最小可用内核
-- SQLite schema
-- EmbeddingProvider
-- Chunker
-- 基础 HNSW
-- Basic Recall
-- Ingest/Forget 基础闭环
-
-### Milestone B：Tide
-- Tag centroid
-- EnergyDecomposer
-- ProjectionEntropy
-- GravityField
-- Weak signal recall
-
-### Milestone C：Synapse
-- Connectome
-- LIFNeuron
-- SpikeEngine
-- Spike trace
-- TagMemo recall
-
-### Milestone D：工程化
-- Repair queue
-- Rebuild/Compaction
-- REST/gRPC/MCP
-- Metrics/Tracing
-- Python/Node SDK
-
-### Milestone E：高级能力
-- Dream mode
-- Quantization/SIMD
-- WASM
-- 多租户
-- 安全过滤
-
----
-
-## 十六、持久化与一致性策略
-
-1. **向量与拓扑**：rkyv + mmap 零拷贝读取
-2. **结构化数据**：SQLite + WAL
-3. **一致性策略**：
-   - 写入先落 SQLite，向量索引异步更新
-   - 索引落盘采用快照 + 增量更新
-
-**SQLite Schema 关键表（摘要）：**
-```
-files(id, filename, file_type, file_hash, total_chunks, created_at, updated_at)
-chunks(id, file_id, chunk_index, chunk_text, embedding_id, token_count, created_at)
-tags(id, name, category, created_at, usage_count, last_used_at)
-chunk_tags(chunk_id, tag_id, confidence)
-connectome(tag_i, tag_j, weight, last_updated)
-neuron_states(tag_id, threshold, tau_membrane, tau_synaptic, total_spikes, last_spike_time, activity_ema)
-retrieval_log(query_text, query_hash, mode, worldview, entropy, result_count, total_time_us, spike_depth, emergent_count, created_at)
-```
-
-**mmap 归档内容：**
-- HNSW 图（层级+边）
-- 向量数据（embedding + tags + 统计）
-- 共现矩阵（CSR 三数组）
-
-**恢复流程：**
-1. mmap 映射归档 → rkyv 校验
-2. SQLite 恢复 tags / chunks / neuron_states
-3. 重建 tag_id ↔ matrix_index 映射
-
----
-
-## 五、可观测性
-
-**核心指标：**
-- 检索总延迟 / 分阶段延迟
-- 结果数 / 弱信号数 / 涌现数
-- Tag 总数 / 共现边数 / 激活比例
-
-**可视化：**
-- D3 拓扑 + 脉冲扩散路径动画
-- WebSocket 实时推送
-
----
-
-## 六、风险控制矩阵
-
-```
-┌────────────────────────┬────────┬─────────────────────────────┐
-│        风险             │ 严重度  │        缓解策略              │
-├────────────────────────┼────────┼─────────────────────────────┤
-│ LIF 参数调优困难         │ 高     │ 参数扫描 + 3 套模板           │
-│ Gram-Schmidt 数值不稳定  │ 高     │ Modified GS + 断言            │
-│ 共现矩阵规模爆炸         │ 中     │ CSR + 定期剪枝                │
-│ 世界观分类准确率不足     │ 中     │ LLM baseline + fallback       │
-│ Rust↔Python/Node 调试难  │ 中     │ 核心逻辑 Rust 内 100% 测试覆盖 │
-└────────────────────────┴────────┴─────────────────────────────┘
-```
-
----
-
-## 七、分阶段落地路线图（最终版）
-
-### Phase 0（Week 0-1）架构验证
-- LIF 原型
-- Gram-Schmidt 原型
-- 小规模 HNSW
-
-### Phase 1（Week 2-4）基础引擎
-- Cortex HNSW + mmap
-- Hippocampus SQLite
-
-### Phase 2（Week 5-7）Tide
-- EnergyDecomposer
-- ProjectionEntropy
-- GravityField + Pipeline
-
-### Phase 3（Week 8-11）LIF
-- LIFNeuron
-- Connectome
-- SpikeEngine + emergent
-
-### Phase 4（Week 12-15）SDK
-- PyO3 / napi-rs
-- REST/gRPC + CLI
-
-### Phase 5（Week 16-18）优化发布
-- SIMD + 量化
-- WASM
-- v0.1.0 发布
-
----
-
-## 八、验收标准
-
-- **性能**：100 万向量 Top-10 < 10ms
-- **质量**：Tide MRR 提升 ≥ 15%
-- **稳定性**：mmap 冷启动 < 500ms
-- **生态**：LangChain + MCP 双集成
-
----
-
-## 九、实现边界声明（防止漂移）
-
-- Seahorse 不做 LLM 生成，仅做记忆检索
-- 不做通用向量数据库替代
-- 所有高级能力必须可降级为 Basic
-
----
-
-## 十、项目结构（建议）
-
-```
-seahorse/
-├── Cargo.toml (workspace)
-├── crates/
-│   ├── seahorse-core/
-│   ├── seahorse-server/
-│   └── seahorse-cli/
-├── bindings/
-│   ├── python/
-│   ├── node/
-│   └── wasm/
-├── proto/
-├── tests/
-├── benchmarks/
-├── docs/
-└── examples/
-```
+# Seahorse Design.All 全景设计文档
+
+更新时间：2026-04-22
+
+## 1. 文档定位
+
+本文是 `design.all` 的正式设计与落地基线，目标是把 Seahorse 从现有 MVP 检索服务推进为面向 AI Agent 的认知记忆引擎。
+
+这份文档同时承担三件事：
+
+1. 定义最终目标架构，说明项目要成为什么。
+2. 明确当前仓库已经实现到什么程度，避免把愿景误写成现状。
+3. 给后续实现提供稳定边界，防止设计漂移、重复造轮子和错误扩面。
+
+本文中的“已落地”仅表示仓库当前代码已经存在并通过验证；“目标态”表示计划实现但当前尚未全部落地。
+
+## 2. 最终目标
+
+Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架，而是一个可组合、可恢复、可审计、可演化的记忆引擎。
+
+最终系统应支持：
+
+- 基础向量检索
+- 基于 tag connectome 的联想召回
+- 基于 Thalamus 的意图分析、熵估计与门控
+- 基于 Cortex 的可持久化向量索引与 archive 恢复
+- 基于 Cerebellum 的后台修复、重建、压缩与 dream 流程
+- 对 REST、CLI、MCP 与后续多语言 SDK 的统一能力暴露
+
+## 3. 当前实现快照
+
+截至 2026-04-22，仓库内已经落地的 `design.all` 能力如下。
+
+### 3.1 已落地
+
+- `embedding_cache` 已持久化，ingest 会按 `namespace + content_hash + model_id` 复用 embedding。
+- `retrieval_log` 已持久化，recall 会记录 `mode`、结果数、耗时与参数快照。
+- `cortex / synapse / thalamus / hippocampus / cerebellum / engine` 已有最小骨架。
+- `Cortex` 已有 bootstrap 版 facade，可插入、查询，并支持 archive 快照往返与损坏边界校验。
+- `connectome` 已持久化，ingest 会根据 chunk tags 更新无向共现边。
+- `Synapse` 已能从 connectome 激活邻居信号。
+- `Recall` 已支持 `basic` 与 `tagmemo` 两种核心模式。
+- `tagmemo` 已具备最小实用语义：
+  - 先做 vector recall
+  - 结果不足时，从 query 自动提取 seed tags
+  - 基于 connectome 激活关联 tags
+  - 回填 `SpikeAssociation` 结果
+  - 已覆盖超时检查与最终分数排序/截断
+
+### 3.2 未落地或仅有骨架
+
+- 真正的 HNSW 分层图与 mmap/rkyv 持久化尚未实现，当前 `Cortex` 仍以 bootstrap 后端为主。
+- `Thalamus` 目前只有最小 `worldview + entropy` 占位分析，尚未接入 recall 主链路。
+- `WeakSignal` / `Tide` / `gravity field` 尚未形成生产可用的召回阶段。
+- `Synapse` 当前不是完整 LIF engine，没有 spike trace、涌现检测、STDP 可塑性。
+- `Cerebellum` 还没有 connectome repair、dream、compaction 等后台任务闭环。
+- `repair_queue` 已存在，但围绕 design.all 的专项修复流程未完整打通。
+- MCP、多语言 SDK、WASM、安全过滤、多租户等均未落地为可发布能力。
+
+## 4. 设计原则
+
+### 4.1 单一职责
+
+每个“脑区”模块只负责自己的边界，不跨层偷做别人的事。
+
+| 模块 | 负责 | 不负责 |
+| --- | --- | --- |
+| `Cortex` | 向量索引、检索、archive | tag 拓扑、意图判断 |
+| `Synapse` | connectome、信号扩散、联想回填 | 向量近邻检索 |
+| `Thalamus` | query 分析、熵、worldview、门控 | 持久化与索引维护 |
+| `Hippocampus` | schema、repository、事务、恢复基础设施 | 认知算法 |
+| `Cerebellum` | 后台任务、修复、重建、压缩、dream | 主请求阻塞计算 |
+| `Pipeline` | 把各模块编排成 ingest / recall / forget / rebuild 链路 | 长期存储细节与后台调度 |
+
+### 4.2 降级优先
+
+所有高级能力必须可降级为 `basic`。
+
+- recall 失败时优先保证可用性，而不是硬失败。
+- ingest 失败时优先保证一致性，而不是部分脏写。
+- design.all 新能力不允许破坏 MVP 已有 API 契约。
+
+### 4.3 审计优先
+
+任何高阶召回都必须留下足够的观测与恢复线索。
+
+- recall 记日志
+- ingest 记 repair 线索
+- archive 恢复失败要有明确错误边界
+- 后台修复流程最终应可审计
+
+## 5. 分层架构
+
+### 5.1 接口层
+
+- `seahorse-server`：现有 HTTP/JSON 服务入口
+- `seahorse-cli`：命令行入口
+- 后续规划：MCP、Python、Node、WASM
+
+### 5.2 编排层
+
+- `pipeline/ingest.rs`
+- `pipeline/recall.rs`
+- `pipeline/forget.rs`
+- `pipeline/rebuild.rs`
+
+编排层的职责是把请求拆成稳定步骤，并把存储、索引、联想和后续高级分析串起来。
+
+### 5.3 认知内核层
+
+#### Cortex
+
+目标态：
+
+- HNSW 分层图
+- 插入、查询、删除标记、重建
+- archive snapshot
+- mmap/rkyv 持久化与恢复
+
+当前态：
+
+- bootstrap 版索引 facade 已存在
+- archive 序列化/反序列化已存在
+- 损坏 archive 拒绝恢复已覆盖
+
+#### Synapse
+
+目标态：
+
+- connectome 邻接结构
+- LIF/spike 扩散
+- hop 控制
+- spike trace
+- emergent pattern 检测
+
+当前态：
+
+- connectome 已落库
+- neighbor activation 已可运行
+- `tagmemo` 已使用该能力进行最小联想回填
+
+#### Thalamus
+
+目标态：
+
+- query decomposition
+- projection entropy
+- worldview gate
+- weak-signal route
+- gravity field
+
+当前态：
+
+- 只有最小 `Thalamus::analyze(query, depth)` 占位实现
+- 尚未进入 recall 主路径
+
+#### Hippocampus
+
+目标态：
+
+- 统一 schema 与 migration
+- repository / transaction / recovery
+- embedding cache / retrieval log / repair queue
+- connectome 与后续 neuron state 的持久化
+
+当前态：
+
+- 已是 design.all 的事实底座
+- 当前不重复实现第二套 repository
+
+#### Cerebellum
+
+目标态：
+
+- repair queue 消费
+- rebuild / compaction
+- connectome maintenance
+- dream 批处理
+
+当前态：
+
+- 只有最小任务调度门面
+
+## 6. 数据模型与存储边界
+
+### 6.1 当前事实边界
+
+当前仓库继续使用 MVP 的 `namespace TEXT` 约束，不做 `namespace_id` 全量改造。
+
+这条边界在 design.all 阶段必须坚持，原因是：
+
+- 当前 schema、repository、HTTP 契约已经围绕 `namespace TEXT` 建立。
+- 直接切到 `namespace_id` 会导致一次跨层重构，风险过高。
+- design.all 当前更重要的是先把认知能力跑通，而不是提前做租户大迁移。
+
+### 6.2 当前已存在的重要表
+
+- `files`
+- `chunks`
+- `tags`
+- `chunk_tags`
+- `repair_queue`
+- `embedding_cache`
+- `retrieval_log`
+- `connectome`
+
+### 6.3 connectome 约束
+
+`connectome` 当前按无向边建模：
+
+- 存储时按 `(tag_i, tag_j)` 排序
+- `weight = cooccur_count as REAL`
+- ingest 在事务中同步更新
+
+这是当前可接受的 bootstrap 语义，后续如要引入衰减、时间因子或 plasticity，必须在此之上演进，不要重写另一套平行结构。
+
+## 7. 核心运行链路
+
+### 7.1 Ingest
+
+当前 ingest 主链路：
+
+1. 文本预处理
+2. chunk 切分
+3. 内容去重判断
+4. embedding cache 命中检查
+5. 缺失 embedding 生成
+6. SQLite 事务写入 files/chunks/tags/chunk_tags
+7. connectome 更新
+8. 向量索引写入
+9. 必要时写 repair task
+
+目标补全项：
+
+- richer chunk mode
+- neuron state 初始化
+- archive snapshot 刷新策略
+- connectome repair / rebuild
+
+### 7.2 Recall
+
+当前 recall 已形成两层模式：
+
+#### `basic`
+
+- query embedding
+- vector search
+- filters
+- 去重
+- 返回 `Vector`
+
+#### `tagmemo`
+
+- 先执行 `basic`
+- 若结果不足，则自动提取 seed tags
+- 通过 `Synapse` 激活 connectome 邻居
+- 用关联 tags 回拉 chunk
+- 计算最终联想分数
+- 返回 `SpikeAssociation`
+
+当前 `tagmemo` 明确具备以下约束：
+
+- 仍受 `timeout_ms` 约束
+- 先打分再排序再截断
+- 不修改 MVP OpenAPI 正式契约
+- 只作为设计版增量能力存在于代码与内部测试，不写入 `docs/mvp-openapi.yaml`
+
+### 7.3 Forget / Rebuild
+
+当前系统已经具备：
+
+- soft delete
+- 基础 rebuild job
+- repair queue 基础设施
+
+但 design.all 视角下仍未完成：
+
+- connectome 回补/重建
+- archive 恢复后的拓扑一致性修复
+- Synapse / Cortex 联合重建策略
+
+## 8. Recall 模式路线图
+
+| 模式 | 当前状态 | 说明 |
+| --- | --- | --- |
+| `basic` | 已完成 | MVP 正式模式 |
+| `tagmemo` | 已完成最小版 | 向量召回不足时走 connectome 联想 |
+| `tide` | 未完成 | 计划引入 entropy / worldview / residual 路由 |
+| `dream` | 未完成 | 计划作为后台离线整合而非主链路默认模式 |
+
+## 9. 最终目标态的 recall 编排
+
+目标态 recall 流水线应如下：
+
+1. `Thalamus` 解析 query，得到 `worldview / entropy / focus`
+2. `Cortex` 执行主向量召回
+3. 若允许弱信号，运行 `Tide` 产生 `WeakSignal`
+4. 若允许联想扩散，运行 `Synapse` 产生 `SpikeAssociation`
+5. 候选集去重
+6. 统一重排
+7. 记录 `retrieval_log`
+8. 在必要时为后台调优与 dream 提供样本
+
+当前距离该目标的关键缺口是：
+
+- `Thalamus` 还未进入 recall pipeline
+- `WeakSignal` 结果源尚不存在
+- 统一重排还没有融合 worldview / entropy / gravity
+
+## 10. 恢复、修复与后台任务
+
+### 10.1 Cortex archive
+
+当前已验证：
+
+- snapshot 可以往返
+- 损坏快照会被拒绝
+
+目标补全：
+
+- 真正的 mmap 落地
+- archive versioning
+- 从 archive + SQLite 恢复到可服务状态
+
+### 10.2 Connectome maintenance
+
+目标需要新增：
+
+- connectome 重建任务
+- connectome 校验任务
+- forget/rebuild 后的边一致性修复
+
+### 10.3 Cerebellum 任务类型
+
+建议后续把后台任务收敛为显式类型，而不是散落在各条链路里：
+
+- `repair_index`
+- `repair_connectome`
+- `refresh_archive`
+- `compact_memory`
+- `dream_pass`
+
+## 11. 可观测性要求
+
+design.all 不是只能“跑出结果”，而是要可解释、可归因、可恢复。
+
+至少应持续补齐：
+
+- recall latency
+- retrieval mode 分布
+- connectome 边数与密度
+- repair queue 状态
+- rebuild / repair age
+- 各来源结果占比：`Vector / WeakSignal / SpikeAssociation`
+- 后续补齐：worldview、entropy、spike depth、emergent count
+
+## 12. 明确不做的事
+
+以下内容不应在当前 design.all 推进中被混入：
+
+- 不把 design.all 实验能力直接写进 `docs/mvp-openapi.yaml`
+- 不为了“全景感”提前上 `namespace_id` 全量重构
+- 不在 `hippocampus/` 下重写一套与 `storage/` 平行的 repository
+- 不把 `tagmemo` 当前最小版误写成完整 LIF engine
+- 不把 `Thalamus` 占位实现误写成真正 Tide 落地
+
+## 13. 建议的实施阶段
+
+### Phase 1：Foundation
+
+目标：
+
+- persistence bootstrap
+- embedding cache
+- retrieval log
+- architecture skeleton
+- cortex bootstrap archive
+- connectome persistence
+- tagmemo minimal recall
+
+状态：已基本完成
+
+### Phase 2：Thalamus 接入
+
+目标：
+
+- 把 `worldview / entropy` 接入 recall metadata
+- 建立 query gating 基线
+- 为后续 `tide` 留稳定接口
+
+状态：下一优先级
+
+### Phase 3：Connectome repair 与后台闭环
+
+目标：
+
+- connectome repair/rebuild
+- Cerebellum 任务闭环
+- forget/rebuild 后的拓扑一致性
+
+状态：未开始
+
+### Phase 4：Cortex 真正持久化
+
+目标：
+
+- HNSW 图演进
+- mmap/rkyv
+- archive 恢复到服务可用
+
+状态：未开始
+
+### Phase 5：高阶能力与生态暴露
+
+目标：
+
+- Tide / WeakSignal
+- Dream
+- MCP / SDK / WASM
+- security / multitenancy
+
+状态：未开始
+
+## 14. 近期执行优先级
+
+按当前仓库状态，建议后续实现顺序为：
+
+1. `Thalamus` 最小接入 recall，先把 `worldview + entropy` 真实写入 `retrieval_log` 与响应 metadata。
+2. 补 `connectome` 修复与重建任务，让 topology 在 forget/rebuild 后可恢复。
+3. 再推进 `Cortex` 的真正持久化，而不是继续在 API 层扩散未落地模式。
+
+## 15. 验收标准
+
+design.all 每推进一层，都至少满足以下要求：
+
+- 有明确的失败测试或回归测试
+- 不破坏现有 MVP 契约
+- 有降级边界
+- 有恢复或修复路径
+- 有可观测数据或日志字段
+- 每个功能独立提交，可从提交历史追踪
+
+## 16. 结论
+
+Seahorse 的 `design.all` 不应该继续停留在“宏大蓝图文档”，而应围绕当前仓库可持续演进的事实地基推进。
+
+当前地基已经具备：
+
+- 存储扩展
+- recall 审计
+- 架构骨架
+- cortex bootstrap
+- connectome 持久化
+- synapse 最小激活
+- tagmemo 最小联想召回
+
+接下来的关键，不是继续铺更大的概念，而是把 `Thalamus`、`Cerebellum` 和 `Cortex` 的剩余闭环按阶段补齐，直到 Seahorse 真正成为一个可运行、可恢复、可审计的认知记忆引擎。
