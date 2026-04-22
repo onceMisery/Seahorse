@@ -13,10 +13,35 @@ impl Default for ThalamusConfig {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThalamicRoute {
+    pub allow_association: bool,
+    pub association_reason: String,
+    pub allow_weak_signal: bool,
+    pub weak_signal_reason: String,
+}
+
+impl ThalamicRoute {
+    pub fn new(
+        allow_association: bool,
+        association_reason: impl Into<String>,
+        allow_weak_signal: bool,
+        weak_signal_reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            allow_association,
+            association_reason: association_reason.into(),
+            allow_weak_signal,
+            weak_signal_reason: weak_signal_reason.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThalamicAnalysis {
     pub worldview: String,
     pub entropy: f32,
+    pub route: ThalamicRoute,
 }
 
 impl ThalamicAnalysis {
@@ -24,6 +49,7 @@ impl ThalamicAnalysis {
         Self {
             worldview: worldview.to_owned(),
             entropy,
+            route: decide_route(worldview, entropy),
         }
     }
 }
@@ -156,10 +182,28 @@ const CREATIVE_KEYWORDS: &[&str] = &[
 const EMOTIONAL_KEYWORDS: &[&str] = &[
     "care", "emotion", "empathy", "feel", "feeling", "grief", "happy", "sad",
 ];
+const ASSOCIATION_ENTROPY_THRESHOLD: f32 = 0.85;
+
+fn decide_route(worldview: &str, entropy: f32) -> ThalamicRoute {
+    let (allow_association, association_reason) = if worldview == "emotional" {
+        (false, "worldview_emotional_blocks_association".to_owned())
+    } else if entropy >= ASSOCIATION_ENTROPY_THRESHOLD {
+        (false, "entropy_above_association_threshold".to_owned())
+    } else {
+        (true, "tagmemo_allowed".to_owned())
+    };
+
+    ThalamicRoute::new(
+        allow_association,
+        association_reason,
+        false,
+        "tide_not_implemented",
+    )
+}
 
 #[cfg(test)]
 mod tests {
-    use super::{ThalamicAnalysis, Thalamus, ThalamusConfig};
+    use super::{ThalamicAnalysis, ThalamicRoute, Thalamus, ThalamusConfig};
 
     #[test]
     fn classifies_technical_queries() {
@@ -170,6 +214,10 @@ mod tests {
         assert_eq!(analysis.worldview, "technical");
         assert!(analysis.entropy > 0.0);
         assert!(analysis.entropy <= 1.0);
+        assert_eq!(
+            analysis.route,
+            ThalamicRoute::new(true, "tagmemo_allowed", false, "tide_not_implemented")
+        );
     }
 
     #[test]
@@ -180,6 +228,7 @@ mod tests {
 
         assert_eq!(analysis.worldview, "creative");
         assert!(analysis.entropy > 0.0);
+        assert!(analysis.route.allow_association);
     }
 
     #[test]
@@ -191,6 +240,37 @@ mod tests {
         assert_eq!(
             analysis,
             ThalamicAnalysis::open("default", analysis.entropy)
+        );
+    }
+
+    #[test]
+    fn blocks_association_for_emotional_queries() {
+        let thalamus = Thalamus::new(ThalamusConfig::default());
+
+        let analysis = thalamus.analyze("feel grief and care", 2);
+
+        assert_eq!(analysis.worldview, "emotional");
+        assert!(!analysis.route.allow_association);
+        assert_eq!(
+            analysis.route.association_reason,
+            "worldview_emotional_blocks_association"
+        );
+        assert!(!analysis.route.allow_weak_signal);
+        assert_eq!(analysis.route.weak_signal_reason, "tide_not_implemented");
+    }
+
+    #[test]
+    fn blocks_association_when_entropy_is_high() {
+        let thalamus = Thalamus::new(ThalamusConfig::default());
+
+        let analysis = thalamus.analyze("alpha beta gamma delta epsilon", 1);
+
+        assert_eq!(analysis.worldview, "default");
+        assert!(analysis.entropy >= 0.85);
+        assert!(!analysis.route.allow_association);
+        assert_eq!(
+            analysis.route.association_reason,
+            "entropy_above_association_threshold"
         );
     }
 }

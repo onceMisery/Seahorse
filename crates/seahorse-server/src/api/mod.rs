@@ -166,6 +166,12 @@ pub struct RecallResponseMetadata {
     pub worldview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entropy: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub association_allowed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub association_reason: Option<String>,
+    pub vector_result_count: usize,
+    pub association_result_count: usize,
 }
 
 #[derive(Debug, Serialize)]

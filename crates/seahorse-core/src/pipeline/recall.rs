@@ -9,7 +9,7 @@ use crate::pipeline::tagging::resolve_tags;
 use crate::storage::{RecallChunkRecord, RetrievalLogWrite, SqliteRepository, StorageError};
 use crate::synapse::{Synapse, SynapseConfig};
 use crate::thalamus::{ThalamicAnalysis, Thalamus, ThalamusConfig};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecallFilters {
@@ -76,6 +76,10 @@ pub struct RecallResponseMetadata {
     pub index_state: String,
     pub worldview: Option<String>,
     pub entropy: Option<f32>,
+    pub association_allowed: Option<bool>,
+    pub association_reason: Option<String>,
+    pub vector_result_count: usize,
+    pub association_result_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -200,8 +204,15 @@ where
             &mut seen,
             started_at,
         )?;
+        let vector_result_count = results.len();
+        let mut association_result_count = 0;
+        let mut association_attempted = false;
 
-        if request.mode == RecallMode::TagMemo && results.len() < request.top_k {
+        if request.mode == RecallMode::TagMemo
+            && results.len() < request.top_k
+            && thalamic_analysis.route.allow_association
+        {
+            association_attempted = true;
             let remaining = request.top_k - results.len();
             let associated = collect_tagmemo_results(
                 self.repository,
@@ -211,6 +222,7 @@ where
                 remaining,
                 started_at,
             )?;
+            association_result_count = associated.len();
             results.extend(associated);
         }
 
@@ -218,14 +230,36 @@ where
         let latency_ms = recall_duration.as_millis().min(u128::from(u64::MAX)) as u64;
         let total_time_us = recall_duration.as_micros().min(i64::MAX as u128) as i64;
         let query_hash = stable_content_hash(query_text);
-        let retrieval_log = RetrievalLogWrite::new(query_text, query_hash, request.mode.as_str())
-            .with_worldview(thalamic_analysis.worldview.clone())
-            .with_entropy(f64::from(thalamic_analysis.entropy))
-            .with_result_count(results.len() as i64)
-            .with_total_time_us(total_time_us)
-            .with_params_snapshot(build_retrieval_log_params_snapshot(&request));
+        let mut retrieval_log =
+            RetrievalLogWrite::new(query_text, query_hash, request.mode.as_str())
+                .with_worldview(thalamic_analysis.worldview.clone())
+                .with_entropy(f64::from(thalamic_analysis.entropy))
+                .with_result_count(results.len() as i64)
+                .with_total_time_us(total_time_us)
+                .with_params_snapshot(build_retrieval_log_params_snapshot(
+                    &request,
+                    &thalamic_analysis,
+                    vector_result_count,
+                    association_result_count,
+                ));
+        if request.mode == RecallMode::TagMemo {
+            retrieval_log = retrieval_log
+                .with_spike_depth(if association_attempted { 1 } else { 0 })
+                .with_emergent_count(association_result_count as i64);
+        }
         self.repository
             .append_retrieval_log(&request.namespace, &retrieval_log)?;
+
+        let association_allowed = if request.mode == RecallMode::TagMemo {
+            Some(thalamic_analysis.route.allow_association)
+        } else {
+            None
+        };
+        let association_reason = if request.mode == RecallMode::TagMemo {
+            Some(thalamic_analysis.route.association_reason.clone())
+        } else {
+            None
+        };
 
         Ok(RecallResult {
             metadata: RecallResponseMetadata {
@@ -237,6 +271,10 @@ where
                 index_state: "ready".to_owned(),
                 worldview: Some(thalamic_analysis.worldview),
                 entropy: Some(thalamic_analysis.entropy),
+                association_allowed,
+                association_reason,
+                vector_result_count,
+                association_result_count,
             },
             results,
         })
@@ -302,25 +340,28 @@ fn validate_request(request: &RecallRequest) -> Result<(), RecallError> {
     Ok(())
 }
 
-fn build_retrieval_log_params_snapshot(request: &RecallRequest) -> String {
-    let file_id = request
-        .filters
-        .file_id
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "null".to_owned());
-    let timeout_ms = request
-        .timeout_ms
-        .map(|value| value.to_string())
-        .unwrap_or_else(|| "null".to_owned());
-
-    format!(
-        "{{\"mode\":\"{}\",\"top_k\":{},\"filter_file_id\":{},\"filter_tag_count\":{},\"timeout_ms\":{}}}",
-        request.mode.as_str(),
-        request.top_k,
-        file_id,
-        request.filters.tags.len(),
-        timeout_ms,
-    )
+fn build_retrieval_log_params_snapshot(
+    request: &RecallRequest,
+    thalamic_analysis: &ThalamicAnalysis,
+    vector_result_count: usize,
+    association_result_count: usize,
+) -> String {
+    json!({
+        "mode": request.mode.as_str(),
+        "top_k": request.top_k,
+        "filter_file_id": request.filters.file_id,
+        "filter_tag_count": request.filters.tags.len(),
+        "timeout_ms": request.timeout_ms,
+        "worldview": thalamic_analysis.worldview,
+        "entropy": thalamic_analysis.entropy,
+        "association_allowed": thalamic_analysis.route.allow_association,
+        "association_reason": thalamic_analysis.route.association_reason,
+        "weak_signal_allowed": thalamic_analysis.route.allow_weak_signal,
+        "weak_signal_reason": thalamic_analysis.route.weak_signal_reason,
+        "vector_result_count": vector_result_count,
+        "association_result_count": association_result_count,
+    })
+    .to_string()
 }
 
 fn collect_vector_results(
@@ -716,6 +757,10 @@ mod tests {
         assert_eq!(result.results.len(), 1);
         assert_eq!(result.metadata.worldview.as_deref(), Some("default"));
         assert!(result.metadata.entropy.is_some());
+        assert_eq!(result.metadata.association_allowed, None);
+        assert_eq!(result.metadata.association_reason, None);
+        assert_eq!(result.metadata.vector_result_count, 1);
+        assert_eq!(result.metadata.association_result_count, 0);
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].mode, "basic");
         assert_eq!(logs[0].query_text, "alpha recall log");
@@ -753,6 +798,8 @@ mod tests {
 
         assert_eq!(result.metadata.worldview.as_deref(), Some("technical"));
         assert!(result.metadata.entropy.is_some());
+        assert_eq!(result.metadata.association_allowed, None);
+        assert_eq!(result.metadata.association_reason, None);
         assert_eq!(logs[0].worldview.as_deref(), Some("technical"));
         assert!(logs[0].entropy.is_some());
     }
@@ -773,6 +820,10 @@ mod tests {
         assert!(result.results.is_empty());
         assert_eq!(result.metadata.worldview.as_deref(), Some("default"));
         assert!(result.metadata.entropy.is_some());
+        assert_eq!(result.metadata.association_allowed, None);
+        assert_eq!(result.metadata.association_reason, None);
+        assert_eq!(result.metadata.vector_result_count, 0);
+        assert_eq!(result.metadata.association_result_count, 0);
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].query_text, "missing recall log");
         assert_eq!(logs[0].worldview.as_deref(), Some("default"));
@@ -807,6 +858,9 @@ mod tests {
         let result = RecallPipeline::new(&mut repository, &provider, &recall_index)
             .recall(request)
             .expect("tagmemo recall");
+        let logs = repository
+            .list_retrieval_logs("default", 10)
+            .expect("list retrieval logs");
 
         assert!(
             result
@@ -816,6 +870,15 @@ mod tests {
                     && item.source_type == "SpikeAssociation"),
             "tagmemo should recover the associated rust chunk through connectome"
         );
+        assert_eq!(result.metadata.association_allowed, Some(true));
+        assert_eq!(
+            result.metadata.association_reason.as_deref(),
+            Some("tagmemo_allowed")
+        );
+        assert_eq!(result.metadata.vector_result_count, 0);
+        assert_eq!(result.metadata.association_result_count, 2);
+        assert_eq!(logs[0].spike_depth, Some(1));
+        assert_eq!(logs[0].emergent_count, Some(2));
     }
 
     #[test]
@@ -873,6 +936,61 @@ mod tests {
             Value::Array(vec![Value::String("rust".to_owned())])
         );
         assert!(metadata["seahorse_association"]["score"].is_number());
+    }
+
+    #[test]
+    fn skips_tagmemo_association_when_thalamus_blocks_route() {
+        let mut repository = repository_with_schema();
+        let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
+        let mut ingest_index = StaticHitIndex::new(4, Vec::new());
+
+        let mut connectome_request = IngestRequest::new("care rust anchor");
+        connectome_request.filename = "connectome.txt".to_owned();
+        connectome_request.tags = vec!["care".to_owned(), "rust".to_owned()];
+        IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+            .ingest(connectome_request)
+            .expect("seed connectome");
+
+        let mut associated_request = IngestRequest::new("rust compiler deep dive");
+        associated_request.filename = "rust.txt".to_owned();
+        associated_request.tags = vec!["rust".to_owned()];
+        IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+            .ingest(associated_request)
+            .expect("seed associated chunk");
+
+        let recall_index = StaticHitIndex::new(4, Vec::new());
+        let mut request = RecallRequest::new("care feel grief");
+        request.mode = RecallMode::TagMemo;
+
+        let result = RecallPipeline::new(&mut repository, &provider, &recall_index)
+            .recall(request)
+            .expect("tagmemo recall");
+        let logs = repository
+            .list_retrieval_logs("default", 10)
+            .expect("list retrieval logs");
+        let params_snapshot = serde_json::from_str::<Value>(
+            logs[0]
+                .params_snapshot
+                .as_deref()
+                .expect("params snapshot should exist"),
+        )
+        .expect("params snapshot should be valid json");
+
+        assert!(result.results.is_empty());
+        assert_eq!(result.metadata.association_allowed, Some(false));
+        assert_eq!(
+            result.metadata.association_reason.as_deref(),
+            Some("worldview_emotional_blocks_association")
+        );
+        assert_eq!(result.metadata.vector_result_count, 0);
+        assert_eq!(result.metadata.association_result_count, 0);
+        assert_eq!(logs[0].spike_depth, Some(0));
+        assert_eq!(logs[0].emergent_count, Some(0));
+        assert_eq!(params_snapshot["association_allowed"], Value::Bool(false));
+        assert_eq!(
+            params_snapshot["association_reason"],
+            Value::String("worldview_emotional_blocks_association".to_owned())
+        );
     }
 
     #[test]

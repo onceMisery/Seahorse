@@ -474,6 +474,16 @@ mod tests {
             Value::String("default".to_owned())
         );
         assert!(body["data"]["metadata"]["entropy"].is_number());
+        assert_eq!(body["data"]["metadata"]["association_allowed"], Value::Null);
+        assert_eq!(body["data"]["metadata"]["association_reason"], Value::Null);
+        assert_eq!(
+            body["data"]["metadata"]["vector_result_count"],
+            Value::from(0)
+        );
+        assert_eq!(
+            body["data"]["metadata"]["association_result_count"],
+            Value::from(0)
+        );
 
         cleanup_db_path(&db_path);
     }
@@ -519,6 +529,79 @@ mod tests {
         assert_eq!(body["success"], Value::Bool(true));
         assert_eq!(body["error"], Value::Null);
         assert!(body["data"]["results"].is_array());
+        assert_eq!(
+            body["data"]["metadata"]["association_allowed"],
+            Value::Bool(true)
+        );
+        assert_eq!(
+            body["data"]["metadata"]["association_reason"],
+            Value::String("tagmemo_allowed".to_owned())
+        );
+        assert!(body["data"]["metadata"]["association_result_count"].is_number());
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[tokio::test]
+    async fn recall_endpoint_reports_blocked_association_route() {
+        let (state, db_path) = test_state("recall-tagmemo-gated");
+
+        let mut connectome_request = CoreIngestRequest::new("care rust anchor".to_owned());
+        connectome_request.filename = "connectome.txt".to_owned();
+        connectome_request.tags = vec!["care".to_owned(), "rust".to_owned()];
+        state.ingest(connectome_request).expect("seed connectome");
+
+        let mut associated_request = CoreIngestRequest::new("rust compiler deep dive".to_owned());
+        associated_request.filename = "rust.txt".to_owned();
+        associated_request.tags = vec!["rust".to_owned()];
+        state
+            .ingest(associated_request)
+            .expect("seed associated chunk");
+
+        let app = build_app(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/recall")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "namespace": "default",
+                            "query": "care feel grief",
+                            "mode": "tagmemo"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build recall request"),
+            )
+            .await
+            .expect("execute recall request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json_body(response).await;
+        assert_eq!(body["success"], Value::Bool(true));
+        assert_eq!(body["error"], Value::Null);
+        assert!(body["data"]["results"].is_array());
+        let results = body["data"]["results"]
+            .as_array()
+            .expect("results should be an array");
+        assert!(!results.is_empty());
+        assert!(results
+            .iter()
+            .all(|item| { item["source_type"] == Value::String("Vector".to_owned()) }));
+        assert_eq!(
+            body["data"]["metadata"]["association_allowed"],
+            Value::Bool(false)
+        );
+        assert_eq!(
+            body["data"]["metadata"]["association_reason"],
+            Value::String("worldview_emotional_blocks_association".to_owned())
+        );
+        assert_eq!(
+            body["data"]["metadata"]["association_result_count"],
+            Value::from(0)
+        );
 
         cleanup_db_path(&db_path);
     }
