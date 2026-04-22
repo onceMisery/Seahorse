@@ -126,6 +126,8 @@ pub async fn post_recall(
             worldview: result.metadata.worldview,
             entropy: result.metadata.entropy.map(f64::from),
             focus_terms: result.metadata.focus_terms,
+            weak_signal_allowed: result.metadata.weak_signal_allowed,
+            weak_signal_reason: result.metadata.weak_signal_reason,
             association_allowed: result.metadata.association_allowed,
             association_reason: result.metadata.association_reason,
             vector_result_count: result.metadata.vector_result_count,

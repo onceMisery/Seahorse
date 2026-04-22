@@ -77,6 +77,8 @@ pub struct RecallResponseMetadata {
     pub worldview: Option<String>,
     pub entropy: Option<f32>,
     pub focus_terms: Vec<String>,
+    pub weak_signal_allowed: bool,
+    pub weak_signal_reason: String,
     pub association_allowed: Option<bool>,
     pub association_reason: Option<String>,
     pub vector_result_count: usize,
@@ -273,6 +275,8 @@ where
                 worldview: Some(thalamic_analysis.worldview),
                 entropy: Some(thalamic_analysis.entropy),
                 focus_terms: thalamic_analysis.focus_terms.clone(),
+                weak_signal_allowed: thalamic_analysis.route.allow_weak_signal,
+                weak_signal_reason: thalamic_analysis.route.weak_signal_reason.clone(),
                 association_allowed,
                 association_reason,
                 vector_result_count,
@@ -764,6 +768,8 @@ mod tests {
             result.metadata.focus_terms,
             vec!["recall".to_owned(), "alpha".to_owned(), "log".to_owned()]
         );
+        assert!(!result.metadata.weak_signal_allowed);
+        assert_eq!(result.metadata.weak_signal_reason, "tide_not_implemented");
         assert_eq!(result.metadata.association_allowed, None);
         assert_eq!(result.metadata.association_reason, None);
         assert_eq!(result.metadata.vector_result_count, 1);
@@ -816,6 +822,8 @@ mod tests {
             result.metadata.focus_terms,
             vec!["recall".to_owned(), "vector".to_owned(), "index".to_owned()]
         );
+        assert!(!result.metadata.weak_signal_allowed);
+        assert_eq!(result.metadata.weak_signal_reason, "tide_not_implemented");
         assert_eq!(result.metadata.association_allowed, None);
         assert_eq!(result.metadata.association_reason, None);
         assert_eq!(logs[0].worldview.as_deref(), Some("technical"));
@@ -850,6 +858,8 @@ mod tests {
             result.metadata.focus_terms,
             vec!["missing".to_owned(), "recall".to_owned(), "log".to_owned()]
         );
+        assert!(!result.metadata.weak_signal_allowed);
+        assert_eq!(result.metadata.weak_signal_reason, "tide_not_implemented");
         assert_eq!(result.metadata.association_allowed, None);
         assert_eq!(result.metadata.association_reason, None);
         assert_eq!(result.metadata.vector_result_count, 0);
@@ -1016,6 +1026,8 @@ mod tests {
             result.metadata.focus_terms,
             vec!["grief".to_owned(), "care".to_owned(), "feel".to_owned()]
         );
+        assert!(!result.metadata.weak_signal_allowed);
+        assert_eq!(result.metadata.weak_signal_reason, "tide_not_implemented");
         assert_eq!(result.metadata.vector_result_count, 0);
         assert_eq!(result.metadata.association_result_count, 0);
         assert_eq!(logs[0].spike_depth, Some(0));

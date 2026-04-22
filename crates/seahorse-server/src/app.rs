@@ -478,6 +478,14 @@ mod tests {
             body["data"]["metadata"]["focus_terms"],
             Value::Array(vec![Value::String("alpha".to_owned()),])
         );
+        assert_eq!(
+            body["data"]["metadata"]["weak_signal_allowed"],
+            Value::Bool(false)
+        );
+        assert_eq!(
+            body["data"]["metadata"]["weak_signal_reason"],
+            Value::String("tide_not_implemented".to_owned())
+        );
         assert_eq!(body["data"]["metadata"]["association_allowed"], Value::Null);
         assert_eq!(body["data"]["metadata"]["association_reason"], Value::Null);
         assert_eq!(
@@ -536,6 +544,14 @@ mod tests {
         assert_eq!(
             body["data"]["metadata"]["focus_terms"],
             Value::Array(vec![Value::String("project".to_owned()),])
+        );
+        assert_eq!(
+            body["data"]["metadata"]["weak_signal_allowed"],
+            Value::Bool(false)
+        );
+        assert_eq!(
+            body["data"]["metadata"]["weak_signal_reason"],
+            Value::String("tide_not_implemented".to_owned())
         );
         assert_eq!(
             body["data"]["metadata"]["association_allowed"],
@@ -609,6 +625,14 @@ mod tests {
                 Value::String("care".to_owned()),
                 Value::String("feel".to_owned()),
             ])
+        );
+        assert_eq!(
+            body["data"]["metadata"]["weak_signal_allowed"],
+            Value::Bool(false)
+        );
+        assert_eq!(
+            body["data"]["metadata"]["weak_signal_reason"],
+            Value::String("tide_not_implemented".to_owned())
         );
         assert_eq!(
             body["data"]["metadata"]["association_reason"],

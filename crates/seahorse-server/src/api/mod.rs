@@ -168,6 +168,8 @@ pub struct RecallResponseMetadata {
     pub entropy: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub focus_terms: Vec<String>,
+    pub weak_signal_allowed: bool,
+    pub weak_signal_reason: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub association_allowed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
