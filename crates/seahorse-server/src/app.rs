@@ -474,6 +474,10 @@ mod tests {
             Value::String("default".to_owned())
         );
         assert!(body["data"]["metadata"]["entropy"].is_number());
+        assert_eq!(
+            body["data"]["metadata"]["focus_terms"],
+            Value::Array(vec![Value::String("alpha".to_owned()),])
+        );
         assert_eq!(body["data"]["metadata"]["association_allowed"], Value::Null);
         assert_eq!(body["data"]["metadata"]["association_reason"], Value::Null);
         assert_eq!(
@@ -529,6 +533,10 @@ mod tests {
         assert_eq!(body["success"], Value::Bool(true));
         assert_eq!(body["error"], Value::Null);
         assert!(body["data"]["results"].is_array());
+        assert_eq!(
+            body["data"]["metadata"]["focus_terms"],
+            Value::Array(vec![Value::String("project".to_owned()),])
+        );
         assert_eq!(
             body["data"]["metadata"]["association_allowed"],
             Value::Bool(true)
@@ -593,6 +601,14 @@ mod tests {
         assert_eq!(
             body["data"]["metadata"]["association_allowed"],
             Value::Bool(false)
+        );
+        assert_eq!(
+            body["data"]["metadata"]["focus_terms"],
+            Value::Array(vec![
+                Value::String("grief".to_owned()),
+                Value::String("care".to_owned()),
+                Value::String("feel".to_owned()),
+            ])
         );
         assert_eq!(
             body["data"]["metadata"]["association_reason"],

@@ -76,6 +76,7 @@ pub struct RecallResponseMetadata {
     pub index_state: String,
     pub worldview: Option<String>,
     pub entropy: Option<f32>,
+    pub focus_terms: Vec<String>,
     pub association_allowed: Option<bool>,
     pub association_reason: Option<String>,
     pub vector_result_count: usize,
@@ -271,6 +272,7 @@ where
                 index_state: "ready".to_owned(),
                 worldview: Some(thalamic_analysis.worldview),
                 entropy: Some(thalamic_analysis.entropy),
+                focus_terms: thalamic_analysis.focus_terms.clone(),
                 association_allowed,
                 association_reason,
                 vector_result_count,
@@ -354,6 +356,7 @@ fn build_retrieval_log_params_snapshot(
         "timeout_ms": request.timeout_ms,
         "worldview": thalamic_analysis.worldview,
         "entropy": thalamic_analysis.entropy,
+        "focus_terms": thalamic_analysis.focus_terms,
         "association_allowed": thalamic_analysis.route.allow_association,
         "association_reason": thalamic_analysis.route.association_reason,
         "weak_signal_allowed": thalamic_analysis.route.allow_weak_signal,
@@ -757,6 +760,10 @@ mod tests {
         assert_eq!(result.results.len(), 1);
         assert_eq!(result.metadata.worldview.as_deref(), Some("default"));
         assert!(result.metadata.entropy.is_some());
+        assert_eq!(
+            result.metadata.focus_terms,
+            vec!["recall".to_owned(), "alpha".to_owned(), "log".to_owned()]
+        );
         assert_eq!(result.metadata.association_allowed, None);
         assert_eq!(result.metadata.association_reason, None);
         assert_eq!(result.metadata.vector_result_count, 1);
@@ -795,13 +802,32 @@ mod tests {
         let logs = repository
             .list_retrieval_logs("default", 10)
             .expect("list retrieval logs");
+        let params_snapshot = serde_json::from_str::<Value>(
+            logs[0]
+                .params_snapshot
+                .as_deref()
+                .expect("params snapshot should exist"),
+        )
+        .expect("params snapshot should be valid json");
 
         assert_eq!(result.metadata.worldview.as_deref(), Some("technical"));
         assert!(result.metadata.entropy.is_some());
+        assert_eq!(
+            result.metadata.focus_terms,
+            vec!["recall".to_owned(), "vector".to_owned(), "index".to_owned()]
+        );
         assert_eq!(result.metadata.association_allowed, None);
         assert_eq!(result.metadata.association_reason, None);
         assert_eq!(logs[0].worldview.as_deref(), Some("technical"));
         assert!(logs[0].entropy.is_some());
+        assert_eq!(
+            params_snapshot["focus_terms"],
+            Value::Array(vec![
+                Value::String("recall".to_owned()),
+                Value::String("vector".to_owned()),
+                Value::String("index".to_owned()),
+            ])
+        );
     }
 
     #[test]
@@ -820,6 +846,10 @@ mod tests {
         assert!(result.results.is_empty());
         assert_eq!(result.metadata.worldview.as_deref(), Some("default"));
         assert!(result.metadata.entropy.is_some());
+        assert_eq!(
+            result.metadata.focus_terms,
+            vec!["missing".to_owned(), "recall".to_owned(), "log".to_owned()]
+        );
         assert_eq!(result.metadata.association_allowed, None);
         assert_eq!(result.metadata.association_reason, None);
         assert_eq!(result.metadata.vector_result_count, 0);
@@ -982,6 +1012,10 @@ mod tests {
             result.metadata.association_reason.as_deref(),
             Some("worldview_emotional_blocks_association")
         );
+        assert_eq!(
+            result.metadata.focus_terms,
+            vec!["grief".to_owned(), "care".to_owned(), "feel".to_owned()]
+        );
         assert_eq!(result.metadata.vector_result_count, 0);
         assert_eq!(result.metadata.association_result_count, 0);
         assert_eq!(logs[0].spike_depth, Some(0));
@@ -990,6 +1024,14 @@ mod tests {
         assert_eq!(
             params_snapshot["association_reason"],
             Value::String("worldview_emotional_blocks_association".to_owned())
+        );
+        assert_eq!(
+            params_snapshot["focus_terms"],
+            Value::Array(vec![
+                Value::String("grief".to_owned()),
+                Value::String("care".to_owned()),
+                Value::String("feel".to_owned()),
+            ])
         );
     }
 

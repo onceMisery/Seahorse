@@ -70,7 +70,7 @@ mod design_all_phase1_tests {
         let analysis = thalamus.analyze("phase1 architecture", 1);
         assert_eq!(
             analysis,
-            ThalamicAnalysis::open("default", analysis.entropy)
+            ThalamicAnalysis::open("default", analysis.entropy, analysis.focus_terms.clone())
         );
 
         let hippocampus = Hippocampus::open_in_memory().expect("open in-memory hippocampus");

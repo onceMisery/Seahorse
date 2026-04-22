@@ -41,14 +41,16 @@ impl ThalamicRoute {
 pub struct ThalamicAnalysis {
     pub worldview: String,
     pub entropy: f32,
+    pub focus_terms: Vec<String>,
     pub route: ThalamicRoute,
 }
 
 impl ThalamicAnalysis {
-    pub fn open(worldview: &str, entropy: f32) -> Self {
+    pub fn open(worldview: &str, entropy: f32, focus_terms: Vec<String>) -> Self {
         Self {
             worldview: worldview.to_owned(),
             entropy,
+            focus_terms,
             route: decide_route(worldview, entropy),
         }
     }
@@ -68,8 +70,9 @@ impl Thalamus {
         let normalized_tokens = tokenize(query);
         let worldview = classify_worldview(&self.config.default_worldview, &normalized_tokens);
         let entropy = estimate_entropy(&normalized_tokens, depth);
+        let focus_terms = extract_focus_terms(&normalized_tokens, depth);
 
-        ThalamicAnalysis::open(&worldview, entropy)
+        ThalamicAnalysis::open(&worldview, entropy, focus_terms)
     }
 }
 
@@ -128,6 +131,33 @@ fn estimate_entropy(normalized_tokens: &[String], depth: usize) -> f32 {
     let depth_factor = 1.0 / (depth.max(1) as f32).sqrt();
 
     (normalized_entropy * depth_factor).clamp(0.0, 1.0)
+}
+
+fn extract_focus_terms(normalized_tokens: &[String], depth: usize) -> Vec<String> {
+    if normalized_tokens.is_empty() {
+        return Vec::new();
+    }
+
+    let focus_limit = depth.clamp(1, 3);
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for token in normalized_tokens {
+        *counts.entry(token.as_str()).or_insert(0) += 1;
+    }
+
+    let mut ranked = counts.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| right.0.len().cmp(&left.0.len()))
+            .then_with(|| left.0.cmp(right.0))
+    });
+
+    ranked
+        .into_iter()
+        .take(focus_limit)
+        .map(|(token, _)| token.to_owned())
+        .collect()
 }
 
 fn tokenize(query: &str) -> Vec<String> {
@@ -214,6 +244,7 @@ mod tests {
         assert_eq!(analysis.worldview, "technical");
         assert!(analysis.entropy > 0.0);
         assert!(analysis.entropy <= 1.0);
+        assert_eq!(analysis.focus_terms, vec!["pipeline", "vector"]);
         assert_eq!(
             analysis.route,
             ThalamicRoute::new(true, "tagmemo_allowed", false, "tide_not_implemented")
@@ -228,6 +259,7 @@ mod tests {
 
         assert_eq!(analysis.worldview, "creative");
         assert!(analysis.entropy > 0.0);
+        assert_eq!(analysis.focus_terms, vec!["concept", "design"]);
         assert!(analysis.route.allow_association);
     }
 
@@ -239,7 +271,7 @@ mod tests {
 
         assert_eq!(
             analysis,
-            ThalamicAnalysis::open("default", analysis.entropy)
+            ThalamicAnalysis::open("default", analysis.entropy, analysis.focus_terms.clone())
         );
     }
 
@@ -271,6 +303,18 @@ mod tests {
         assert_eq!(
             analysis.route.association_reason,
             "entropy_above_association_threshold"
+        );
+    }
+
+    #[test]
+    fn extracts_ranked_focus_terms() {
+        let thalamus = Thalamus::new(ThalamusConfig::default());
+
+        let analysis = thalamus.analyze("alpha alpha beta gamma gamma gamma", 3);
+
+        assert_eq!(
+            analysis.focus_terms,
+            vec!["gamma".to_owned(), "alpha".to_owned(), "beta".to_owned()]
         );
     }
 }
