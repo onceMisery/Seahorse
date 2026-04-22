@@ -4,8 +4,6 @@
 
 ## 1. 文档说明
 
-本文基于 `README.md` 与 `docs/seahorse-final-vision.md` 绘制 Seahorse 的最终目标态架构图。
-
 这是一份终局架构图，不代表当前仓库已经全部实现，而是回答：
 
 - Seahorse 最终完成后会由哪些层组成
