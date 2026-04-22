@@ -75,6 +75,11 @@ impl CortexArchiveSnapshot {
                 .map_err(|_| CortexArchiveError::InvalidFormat {
                     message: "archive dimension is invalid".to_owned(),
                 })?;
+        if dimension == 0 {
+            return Err(CortexArchiveError::InvalidFormat {
+                message: "archive dimension must be greater than zero".to_owned(),
+            });
+        }
         let expected_entries =
             header_parts[2]
                 .parse::<usize>()
@@ -189,5 +194,13 @@ mod tests {
 
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].chunk_id, 10);
+    }
+
+    #[test]
+    fn rejects_corrupted_cortex_archive_snapshot() {
+        let error =
+            CortexArchiveSnapshot::from_bytes(b"v1|0|0").expect_err("corrupted archive must fail");
+
+        assert!(error.to_string().contains("dimension"));
     }
 }
