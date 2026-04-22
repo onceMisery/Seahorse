@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::Connection;
 use seahorse_core::{
-    IngestRequest as CoreIngestRequest, MaintenanceJob, RebuildRequest as CoreRebuildRequest,
-    RebuildScope, SqliteRepository,
+    ForgetRequest as CoreForgetRequest, IngestRequest as CoreIngestRequest, MaintenanceJob,
+    RebuildRequest as CoreRebuildRequest, RebuildScope, SqliteRepository,
 };
 use seahorse_server::{
     config::ServerConfig,
@@ -292,6 +292,79 @@ fn rebuild_failure_restores_index_state_from_rebuilding_to_degraded() {
             .as_deref(),
         Some("degraded")
     );
+
+    cleanup_db_path(&db_path);
+}
+
+#[test]
+fn repair_worker_rebuilds_connectome_after_forget() {
+    let db_path = unique_db_path("connectome-repair");
+    let state = build_state(
+        &db_path,
+        3,
+        AppStateTestOptions::default().with_spawn_repair_worker(false),
+    );
+
+    let mut connectome_request = ingest_request("connectome.txt", "project rust anchor");
+    connectome_request.tags = vec!["project".to_owned(), "rust".to_owned()];
+    let connectome_ingest = state
+        .ingest(connectome_request)
+        .expect("seed connectome file");
+
+    let mut associated_request = ingest_request("rust.txt", "rust compiler deep dive");
+    associated_request.tags = vec!["rust".to_owned()];
+    state
+        .ingest(associated_request)
+        .expect("seed associated file");
+
+    let forget_result = state
+        .forget(CoreForgetRequest::for_file(connectome_ingest.file_id))
+        .expect("forget should succeed");
+    assert_eq!(forget_result.index_cleanup_status, "completed");
+    assert!(forget_result.repair_task_id.is_none());
+
+    let repository = open_repository(&db_path);
+    let stale_neighbors = repository
+        .list_connectome_neighbors("default", "project", 10)
+        .expect("load stale connectome neighbors");
+    assert!(
+        stale_neighbors.iter().any(|edge| edge.target_tag == "rust"),
+        "forget should leave stale connectome edge until repair worker rebuilds it"
+    );
+    let pending_task = repository
+        .find_active_repair_task("default", "connectome_rebuild", "namespace")
+        .expect("find active connectome rebuild task")
+        .expect("connectome rebuild task should exist");
+    assert_eq!(pending_task.status, "pending");
+    drop(repository);
+
+    let worker_result = state
+        .run_repair_worker_once_for_tests()
+        .expect("repair worker should run connectome rebuild");
+    assert_eq!(worker_result.scanned, 1);
+    assert_eq!(worker_result.succeeded, 1);
+
+    let repository = open_repository(&db_path);
+    let repaired_task = repository
+        .get_repair_task(pending_task.id)
+        .expect("load repaired connectome task")
+        .expect("repaired connectome task should exist");
+    assert_eq!(repaired_task.status, "succeeded");
+
+    let rebuilt_neighbors = repository
+        .list_connectome_neighbors("default", "project", 10)
+        .expect("load rebuilt connectome neighbors");
+    assert!(
+        rebuilt_neighbors
+            .iter()
+            .all(|edge| edge.target_tag != "rust"),
+        "connectome rebuild should remove stale edge from deleted file"
+    );
+
+    let stats = state
+        .stats_snapshot()
+        .expect("load stats after connectome rebuild");
+    assert_eq!(stats.repair_queue_size, 0);
 
     cleanup_db_path(&db_path);
 }
