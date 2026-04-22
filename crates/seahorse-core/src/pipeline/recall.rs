@@ -4,7 +4,8 @@ use std::time::Instant;
 
 use crate::embedding::{EmbeddingError, EmbeddingProvider};
 use crate::index::{IndexError, SearchRequest, VectorIndex};
-use crate::storage::{RecallChunkRecord, SqliteRepository, StorageError};
+use crate::pipeline::hashing::stable_content_hash;
+use crate::storage::{RecallChunkRecord, RetrievalLogWrite, SqliteRepository, StorageError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecallFilters {
@@ -121,7 +122,7 @@ where
     P: EmbeddingProvider + ?Sized,
     I: VectorIndex + ?Sized,
 {
-    repository: &'a SqliteRepository,
+    repository: &'a mut SqliteRepository,
     embedding_provider: &'a P,
     vector_index: &'a I,
 }
@@ -132,7 +133,7 @@ where
     I: VectorIndex + ?Sized,
 {
     pub fn new(
-        repository: &'a SqliteRepository,
+        repository: &'a mut SqliteRepository,
         embedding_provider: &'a P,
         vector_index: &'a I,
     ) -> Self {
@@ -143,7 +144,7 @@ where
         }
     }
 
-    pub fn recall(&self, request: RecallRequest) -> Result<RecallResult, RecallError> {
+    pub fn recall(&mut self, request: RecallRequest) -> Result<RecallResult, RecallError> {
         validate_request(&request)?;
 
         let started_at = Instant::now();
@@ -202,10 +203,21 @@ where
             }
         }
 
+        let recall_duration = started_at.elapsed();
+        let latency_ms = recall_duration.as_millis().min(u128::from(u64::MAX)) as u64;
+        let total_time_us = recall_duration.as_micros().min(i64::MAX as u128) as i64;
+        let query_hash = stable_content_hash(query_text);
+        let retrieval_log = RetrievalLogWrite::new(query_text, query_hash, "basic")
+            .with_result_count(results.len() as i64)
+            .with_total_time_us(total_time_us)
+            .with_params_snapshot(build_retrieval_log_params_snapshot(&request));
+        self.repository
+            .append_retrieval_log(&request.namespace, &retrieval_log)?;
+
         Ok(RecallResult {
             metadata: RecallResponseMetadata {
                 top_k: request.top_k,
-                latency_ms: started_at.elapsed().as_millis() as u64,
+                latency_ms,
                 degraded: false,
                 degraded_reason: None,
                 result_count: results.len(),
@@ -236,6 +248,26 @@ fn validate_request(request: &RecallRequest) -> Result<(), RecallError> {
     }
 
     Ok(())
+}
+
+fn build_retrieval_log_params_snapshot(request: &RecallRequest) -> String {
+    let file_id = request
+        .filters
+        .file_id
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_owned());
+    let timeout_ms = request
+        .timeout_ms
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".to_owned());
+
+    format!(
+        "{{\"top_k\":{},\"filter_file_id\":{},\"filter_tag_count\":{},\"timeout_ms\":{}}}",
+        request.top_k,
+        file_id,
+        request.filters.tags.len(),
+        timeout_ms,
+    )
 }
 
 fn ensure_not_timed_out(started_at: Instant, timeout_ms: Option<u64>) -> Result<(), RecallError> {
@@ -327,7 +359,7 @@ mod tests {
             }],
         );
 
-        let result = RecallPipeline::new(&repository, &provider, &recall_index)
+        let result = RecallPipeline::new(&mut repository, &provider, &recall_index)
             .recall(RecallRequest::new("alpha project"))
             .expect("recall");
 
@@ -386,7 +418,7 @@ mod tests {
             tags: vec!["project".to_owned(), "rust".to_owned()],
         };
 
-        let result = RecallPipeline::new(&repository, &provider, &recall_index)
+        let result = RecallPipeline::new(&mut repository, &provider, &recall_index)
             .recall(request)
             .expect("recall");
 
@@ -420,7 +452,7 @@ mod tests {
             ],
         );
 
-        let result = RecallPipeline::new(&repository, &provider, &recall_index)
+        let result = RecallPipeline::new(&mut repository, &provider, &recall_index)
             .recall(RecallRequest::new("duplicate chunk id"))
             .expect("recall");
 
@@ -429,14 +461,14 @@ mod tests {
 
     #[test]
     fn validates_basic_request_bounds() {
-        let repository = repository_with_schema();
+        let mut repository = repository_with_schema();
         let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
         let recall_index = StaticHitIndex::new(4, Vec::new());
 
         let mut request = RecallRequest::new(" ");
         request.top_k = 0;
 
-        let error = RecallPipeline::new(&repository, &provider, &recall_index)
+        let error = RecallPipeline::new(&mut repository, &provider, &recall_index)
             .recall(request)
             .expect_err("invalid request should fail");
 
@@ -445,14 +477,14 @@ mod tests {
 
     #[test]
     fn times_out_when_timeout_budget_is_exhausted() {
-        let repository = repository_with_schema();
+        let mut repository = repository_with_schema();
         let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
         let recall_index = StaticHitIndex::new(4, Vec::new());
 
         let mut request = RecallRequest::new("alpha");
         request.timeout_ms = Some(0);
 
-        let error = RecallPipeline::new(&repository, &provider, &recall_index)
+        let error = RecallPipeline::new(&mut repository, &provider, &recall_index)
             .recall(request)
             .expect_err("timeout budget should fail recall");
 
@@ -460,6 +492,59 @@ mod tests {
             super::RecallError::Timeout { timeout_ms, .. } => assert_eq!(timeout_ms, 0),
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn persists_retrieval_log_for_successful_recall() {
+        let mut repository = repository_with_schema();
+        let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
+        let mut ingest_index = StaticHitIndex::new(4, Vec::new());
+
+        let ingest_result = IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+            .ingest(IngestRequest::new("alpha recall log"))
+            .expect("ingest");
+        let recall_index = StaticHitIndex::new(
+            4,
+            vec![SearchHit {
+                chunk_id: ingest_result.chunk_ids[0],
+                namespace: "default".to_owned(),
+                score: 0.95,
+            }],
+        );
+
+        let result = RecallPipeline::new(&mut repository, &provider, &recall_index)
+            .recall(RecallRequest::new("alpha recall log"))
+            .expect("recall");
+        let logs = repository
+            .list_retrieval_logs("default", 10)
+            .expect("list retrieval logs");
+
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].mode, "basic");
+        assert_eq!(logs[0].query_text, "alpha recall log");
+        assert_eq!(logs[0].result_count, 1);
+        assert!(logs[0].total_time_us.is_some());
+        assert!(logs[0].params_snapshot.is_some());
+    }
+
+    #[test]
+    fn persists_retrieval_log_for_empty_result_recall() {
+        let mut repository = repository_with_schema();
+        let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
+        let recall_index = StaticHitIndex::new(4, Vec::new());
+
+        let result = RecallPipeline::new(&mut repository, &provider, &recall_index)
+            .recall(RecallRequest::new("missing recall log"))
+            .expect("recall");
+        let logs = repository
+            .list_retrieval_logs("default", 10)
+            .expect("list retrieval logs");
+
+        assert!(result.results.is_empty());
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].query_text, "missing recall log");
+        assert_eq!(logs[0].result_count, 0);
     }
 
     #[derive(Debug)]

@@ -412,7 +412,7 @@ impl AppState {
     }
 
     pub fn recall(&self, request: CoreRecallRequest) -> Result<CoreRecallResult, AppStateError> {
-        let services = self
+        let mut services = self
             .services
             .lock()
             .map_err(|_| AppStateError::Unavailable {
@@ -425,7 +425,7 @@ impl AppState {
             .map_err(|_| AppStateError::Unavailable {
                 message: "vector index lock poisoned",
             })?;
-        let pipeline = RecallPipeline::new(&services.repository, &provider, &*vector_index);
+        let mut pipeline = RecallPipeline::new(&mut services.repository, &provider, &*vector_index);
         let mut result = pipeline.recall(request).map_err(AppStateError::Recall)?;
         let index_state = current_index_state(&services.repository)?;
         apply_runtime_index_state(&mut result, index_state);

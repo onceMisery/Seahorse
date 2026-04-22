@@ -293,7 +293,7 @@ mod tests {
         let result = forget_pipeline
             .forget(ForgetRequest::for_file(ingest.file_id))
             .expect("forget");
-        let recall = RecallPipeline::new(&repository, &provider, &index)
+        let recall = RecallPipeline::new(&mut repository, &provider, &index)
             .recall(RecallRequest::new("forget me"))
             .expect("recall");
 
