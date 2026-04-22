@@ -4,7 +4,7 @@
 
 - 当前版本可以视为“发布候选 MVP”
 - 已关闭的关键 release blocker：runtime config、contract、E2E、fault recovery、10k chunk perf gate 实现
-- 当前仍未关闭的 release blocker：结构化请求日志、监控平台告警落地、release 环境 10k chunk hard gate 最终过线
+- 当前仍未关闭的 release blocker：日志采集/落库/检索链路验证、监控平台告警落地、release 环境 10k chunk hard gate 最终过线
 
 ## 已验证证据
 
@@ -53,5 +53,5 @@
 ## 后续动作
 
 1. 在更稳定的 release 机器上复测 10k chunk hard gate
-2. 完成 operator docs 与 release handoff 文档最终收口
+2. 完成 operator docs 与 release handoff 文档最终收口，并保留 `/ready` / `/live` / 新增 metrics 的验证记录
 3. 在监控平台落地告警规则并保留验证记录

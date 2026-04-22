@@ -859,6 +859,40 @@ impl SqliteRepository {
         Ok(counts)
     }
 
+    pub fn load_oldest_repair_task_age_seconds(
+        &self,
+        namespace: &str,
+    ) -> StorageResult<Option<f64>> {
+        let age_seconds = self.connection.query_row(
+            "SELECT MAX((julianday('now') - julianday(created_at)) * 86400.0)
+             FROM repair_queue
+             WHERE namespace = ?1
+               AND status IN ('pending', 'running', 'failed', 'deadletter')",
+            [namespace],
+            |row| row.get::<_, Option<f64>>(0),
+        )?;
+
+        Ok(age_seconds.filter(|value| value.is_finite() && *value >= 0.0))
+    }
+
+    pub fn load_oldest_active_maintenance_job_age_seconds(
+        &self,
+        job_type: &str,
+        namespace: &str,
+    ) -> StorageResult<Option<f64>> {
+        let age_seconds = self.connection.query_row(
+            "SELECT MAX((julianday('now') - julianday(COALESCE(started_at, created_at))) * 86400.0)
+             FROM maintenance_jobs
+             WHERE job_type = ?1
+               AND namespace = ?2
+               AND status IN ('queued', 'running')",
+            params![job_type, namespace],
+            |row| row.get::<_, Option<f64>>(0),
+        )?;
+
+        Ok(age_seconds.filter(|value| value.is_finite() && *value >= 0.0))
+    }
+
     fn list_tags_by_chunk_id(&self, chunk_id: i64) -> StorageResult<Vec<String>> {
         let mut statement = self.connection.prepare(
             "SELECT t.normalized_name
@@ -1688,5 +1722,76 @@ mod tests {
         assert_eq!(stats.deleted_chunk_count, 1);
         assert_eq!(stats.repair_queue_size, 1);
         assert_eq!(stats.index_status, "degraded");
+    }
+
+    #[test]
+    fn loads_oldest_repair_task_and_active_job_ages() {
+        let mut repository = repository_with_schema();
+        let batch = IngestWriteBatch {
+            file: FileWrite::new("ops.txt", "ops-hash"),
+            chunks: vec![ChunkWrite::new(
+                0,
+                "ops visibility content",
+                "ops-chunk-hash",
+                "test-model",
+                3,
+            )],
+            tags: vec![],
+            chunk_tags: vec![],
+        };
+        let persisted = repository
+            .write_ingest_batch(&batch)
+            .expect("write ingest batch");
+
+        repository
+            .enqueue_repair_task(
+                "default",
+                "index_insert",
+                "chunk",
+                Some(persisted.chunks[0].id),
+                None,
+            )
+            .expect("enqueue repair task");
+        repository
+            .create_maintenance_job("rebuild", "default", Some("{\"scope\":\"all\"}"))
+            .expect("create maintenance job");
+
+        repository
+            .connection
+            .execute(
+                "UPDATE repair_queue
+                 SET created_at = datetime('now', '-120 seconds')
+                 WHERE namespace = 'default'",
+                [],
+            )
+            .expect("age repair queue task");
+        repository
+            .connection
+            .execute(
+                "UPDATE maintenance_jobs
+                 SET created_at = datetime('now', '-180 seconds')
+                 WHERE job_type = 'rebuild'
+                   AND namespace = 'default'",
+                [],
+            )
+            .expect("age maintenance job");
+
+        let repair_age = repository
+            .load_oldest_repair_task_age_seconds("default")
+            .expect("load oldest repair task age")
+            .expect("repair age should exist");
+        let rebuild_age = repository
+            .load_oldest_active_maintenance_job_age_seconds("rebuild", "default")
+            .expect("load oldest rebuild age")
+            .expect("rebuild age should exist");
+
+        assert!(
+            repair_age >= 120.0,
+            "expected repair age >= 120s, got {repair_age}"
+        );
+        assert!(
+            rebuild_age >= 180.0,
+            "expected rebuild age >= 180s, got {rebuild_age}"
+        );
     }
 }

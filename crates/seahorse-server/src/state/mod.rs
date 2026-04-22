@@ -246,6 +246,8 @@ pub struct MetricsSnapshot {
     pub health: HealthSnapshot,
     pub repair_queue_statuses: Vec<StatusCountSnapshot>,
     pub rebuild_job_statuses: Vec<StatusCountSnapshot>,
+    pub repair_oldest_task_age_seconds: Option<f64>,
+    pub rebuild_oldest_active_job_age_seconds: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -630,6 +632,14 @@ impl AppState {
             .into_iter()
             .map(map_status_count)
             .collect();
+        let repair_oldest_task_age_seconds = services
+            .repository
+            .load_oldest_repair_task_age_seconds(DEFAULT_NAMESPACE)
+            .map_err(AppStateError::Storage)?;
+        let rebuild_oldest_active_job_age_seconds = services
+            .repository
+            .load_oldest_active_maintenance_job_age_seconds("rebuild", DEFAULT_NAMESPACE)
+            .map_err(AppStateError::Storage)?;
         let vector_index = self
             .vector_index
             .lock()
@@ -653,6 +663,8 @@ impl AppState {
             },
             repair_queue_statuses,
             rebuild_job_statuses,
+            repair_oldest_task_age_seconds,
+            rebuild_oldest_active_job_age_seconds,
         })
     }
 }

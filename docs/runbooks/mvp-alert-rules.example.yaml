@@ -1,0 +1,57 @@
+groups:
+  - name: seahorse-mvp
+    rules:
+      - alert: SeahorseHealthFailed
+        expr: seahorse_health_status{status="failed"} == 1
+        for: 1m
+        labels:
+          severity: critical
+          service: seahorse
+        annotations:
+          summary: Seahorse instance health failed
+          description: The instance reports failed health and should be removed from traffic.
+
+      - alert: SeahorseRepairDeadletter
+        expr: seahorse_repair_queue_tasks{status="deadletter"} > 0
+        for: 1m
+        labels:
+          severity: critical
+          service: seahorse
+        annotations:
+          summary: Seahorse repair queue has deadletter tasks
+          description: Automatic repair can no longer converge and requires operator action.
+
+      - alert: SeahorseRepairBacklogStalled
+        expr: seahorse_repair_oldest_task_age_seconds > 300
+        for: 5m
+        labels:
+          severity: warning
+          service: seahorse
+        annotations:
+          summary: Seahorse repair backlog appears stalled
+          description: The oldest repair task has been pending for more than 5 minutes.
+
+      - alert: SeahorseRebuildStalled
+        expr: seahorse_rebuild_jobs{status="running"} > 0 and seahorse_rebuild_oldest_active_job_age_seconds > 900
+        for: 10m
+        labels:
+          severity: warning
+          service: seahorse
+        annotations:
+          summary: Seahorse rebuild appears stalled
+          description: An active rebuild job has been running for more than 15 minutes.
+
+      - alert: SeahorseHighHttpErrorRate
+        expr: |
+          (
+            sum(rate(seahorse_http_request_errors_total{scope="route"}[5m]))
+            /
+            clamp_min(sum(rate(seahorse_http_requests_total{scope="route"}[5m])), 1)
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: seahorse
+        annotations:
+          summary: Seahorse HTTP error rate is elevated
+          description: The 5-minute HTTP error rate has exceeded 5%.

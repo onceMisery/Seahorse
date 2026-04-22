@@ -447,7 +447,7 @@ paths:
         正式运维契约默认暴露 GET /metrics。
         该端点仅在 observability.enable_metrics=true 时挂载；默认配置为开启。
         若运行时通过 observability.metrics_path 覆盖路径，则相同格式响应会暴露在配置路径上。
-        指标包含 HTTP 请求、repair queue 状态分布、rebuild job 状态分布、index_state 与 health_status。
+        指标包含 HTTP 请求、repair queue 状态分布、rebuild job 状态分布、repair/rebuild 年龄 gauge、index_state 与 health_status。
       responses:
         '200':
           description: Prometheus exposition format

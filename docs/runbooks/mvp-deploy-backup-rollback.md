@@ -6,14 +6,14 @@
 
 - 单 namespace，固定为 `default`
 - SQLite 作为唯一事实源
-- server 通过 REST API 暴露 `ingest` / `recall` / `forget` / `rebuild` / `jobs` / `stats` / `health` / `metrics`
+- server 通过 REST API 暴露 `ingest` / `recall` / `forget` / `rebuild` / `jobs` / `stats` / `health` / `ready` / `live` / `metrics`
 - 部署目标为本地环境或受信内网
 
 当前代码已实现并可按本手册执行的能力：
 
 - `/metrics` 已作为正式运维接口实现；仅当 `enable_metrics=true` 时挂载，默认配置开启，默认路径为 `/metrics`，也可由 `observability.metrics_path` 覆盖
 - `POST /forget` 当前正式契约固定为 `mode=soft`，`hard` 不属于当前 MVP 发布契约
-- `health` / `stats` / `metrics` 可用于最小人工巡检，`rebuild` / `jobs` 可用于恢复路径操作
+- `health` / `stats` / `metrics` 可用于最小人工巡检，`ready` / `live` 可用于平台探针，`rebuild` / `jobs` 可用于恢复路径操作
 - rebuild 启动恢复、repair queue 故障恢复、fault recovery 自动化验证都已有证据
 
 ## 2. 部署前检查
@@ -32,6 +32,8 @@
 4. 启动服务并等待 SQLite migration 自动执行完成
 5. 检查：
    - `GET /health`
+   - `GET /ready`
+   - `GET /live`
    - `GET /stats`
    - 若开启 metrics，再检查 `GET /metrics`
 6. 手工执行一次最小链路：
@@ -49,14 +51,37 @@
   - `ok`: 当前实例可正常服务
   - `degraded`: 常见于 rebuild 期间或索引存在待修复项
   - `failed`: 当前实例不应继续提供正常流量
+- `GET /ready`
+  - `200`: 当前实例仍可承接 MVP 流量
+  - `503`: 当前实例不应继续接收流量
+- `GET /live`
+  - `200`: 进程仍然存活
+  - 若探针失败，应优先按进程级故障处理，而不是直接判定为数据损坏
 - `GET /stats`
   - 关注 `chunk_count`、`deleted_chunk_count`、`repair_queue_size`、`index_status`
 - `GET /metrics`
   - 关注 `seahorse_http_requests_total`
   - 关注 `seahorse_http_request_errors_total`
   - 关注 `seahorse_http_request_latency_ms_max`
+  - 关注 `seahorse_repair_queue_tasks`
+  - 关注 `seahorse_rebuild_jobs`
+  - 关注 `seahorse_repair_oldest_task_age_seconds`
+  - 关注 `seahorse_rebuild_oldest_active_job_age_seconds`
   - 关注 `seahorse_index_state`
   - 关注 `seahorse_health_status`
+
+推荐最小告警建议：
+
+- `seahorse_health_status{status="failed"} == 1`
+  - 直接告警，实例退出流量
+- `seahorse_repair_queue_tasks{status="deadletter"} > 0`
+  - 直接告警，表示 repair 已无法自动收敛
+- `seahorse_repair_oldest_task_age_seconds > 300`
+  - 持续 5 分钟以上告警，表示 repair 队列可能堆积但未前进
+- `seahorse_rebuild_jobs{status="running"} > 0` 且 `seahorse_rebuild_oldest_active_job_age_seconds > 900`
+  - 持续 10 分钟以上告警，表示 rebuild 可能卡住
+- `seahorse_http_request_errors_total` 快速增长
+  - 结合时间窗口做错误率告警，不建议只看累计绝对值
 
 ## 5. SQLite 备份
 
@@ -109,7 +134,7 @@
 
 - `contract` / `E2E` / `故障注入` 自动化测试已经补齐，但要保留对应命令与结果作为交接证据
 - release 环境上的 `10k chunk` hard gate 仍需最终过线确认
-- 结构化请求日志完整接入尚未完成
+- 结构化请求日志已在代码侧完成，仍需保留日志采集/落库/检索链路验证记录
 - 告警规则虽然已有阈值建议，但还未在统一监控平台落地
 
 ## 9. 当前定位

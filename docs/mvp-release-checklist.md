@@ -39,6 +39,8 @@
 - `POST /admin/rebuild` 可调用
 - `GET /admin/jobs/{job_id}` 可调用
 - `GET /health` 可调用
+- `GET /ready` 可调用
+- `GET /live` 可调用
 - `GET /stats` 可调用
 - 若开启 metrics，`GET /metrics` 或配置指定路径可抓取 Prometheus 文本格式
 
@@ -53,6 +55,10 @@
    - `seahorse_http_requests_total`
    - `seahorse_http_request_errors_total`
    - `seahorse_http_request_latency_ms_max`
+   - `seahorse_repair_queue_tasks`
+   - `seahorse_rebuild_jobs`
+   - `seahorse_repair_oldest_task_age_seconds`
+   - `seahorse_rebuild_oldest_active_job_age_seconds`
    - `seahorse_index_state`
    - `seahorse_health_status`
 
@@ -69,7 +75,7 @@
 - HTTP 主链路接口已实现：`POST /ingest`、`POST /recall`、`POST /forget`、`POST /admin/rebuild`、`GET /admin/jobs/{job_id}`、`GET /stats`、`GET /health`
 - 平台探针接口已实现：`GET /ready`（readiness）、`GET /live`（liveness）
 - `/metrics` 已作为正式运维接口实现；仅当 `enable_metrics=true` 时挂载，默认配置开启，默认路径为 `/metrics`，也可由 `observability.metrics_path` 覆盖
-- `/metrics` 已包含 HTTP 请求、repair queue 状态分布、rebuild job 状态分布、index_state、health_status 等核心指标
+- `/metrics` 已包含 HTTP 请求、repair queue 状态分布、rebuild job 状态分布、repair/rebuild 年龄指标、index_state、health_status 等核心指标
 - `POST /forget` 当前正式契约固定为 `mode=soft`，`hard` 不属于当前 MVP 发布契约
 - SQLite 备份、回滚、rebuild、health / stats / metrics 的人工巡检路径已在现有文档中定义
 
@@ -104,7 +110,6 @@
 
 如果要定义为“最终可交付的发布型 MVP”，还需要补齐：
 
-1. operator docs 与 release handoff 文档收口
-2. 监控平台中的告警规则落地
-3. release 环境上的 `10k chunk` hard gate 通过确认
-4. 最终发布材料回填与归档
+1. 监控平台中的告警规则落地
+2. release 环境上的 `10k chunk` hard gate 通过确认
+3. 最终发布材料回填与归档

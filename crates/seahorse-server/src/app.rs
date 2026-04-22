@@ -649,6 +649,47 @@ mod tests {
         cleanup_db_path(&db_path);
     }
 
+    #[tokio::test]
+    async fn metrics_endpoint_exposes_repair_and_rebuild_age_gauges() {
+        let (state, db_path) = test_state_with_options(
+            "metrics-age-gauges",
+            AppStateTestOptions::default()
+                .with_spawn_repair_worker(false)
+                .with_runtime_index_faults(RuntimeIndexFaultConfig::default().fail_insert_always()),
+        );
+        state
+            .ingest(CoreIngestRequest::new(
+                "metrics age gauges alpha beta gamma".to_owned(),
+            ))
+            .expect("seed failed index ingest");
+        enqueue_rebuild_job(&db_path, "all", false);
+        age_repair_tasks(&db_path, 90);
+        age_rebuild_jobs(&db_path, 150);
+        let app = build_app(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("build metrics request"),
+            )
+            .await
+            .expect("execute metrics request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_text_body(response).await;
+        assert_metric_value_at_least(&body, "seahorse_repair_oldest_task_age_seconds", 90.0);
+        assert_metric_value_at_least(
+            &body,
+            "seahorse_rebuild_oldest_active_job_age_seconds",
+            150.0,
+        );
+
+        cleanup_db_path(&db_path);
+    }
+
     fn test_state(name: &str) -> (AppState, PathBuf) {
         let db_path = unique_db_path(name);
         let state = AppState::new_with_db_path(
@@ -798,6 +839,47 @@ mod tests {
         repository
             .set_schema_meta_value("index_state", value)
             .expect("set index_state");
+    }
+
+    fn age_repair_tasks(db_path: &PathBuf, age_seconds: u64) {
+        let connection = Connection::open(db_path).expect("open sqlite db for repair aging");
+        connection
+            .execute(
+                "UPDATE repair_queue
+                 SET created_at = datetime('now', ?1)",
+                [format!("-{age_seconds} seconds")],
+            )
+            .expect("age repair tasks");
+    }
+
+    fn age_rebuild_jobs(db_path: &PathBuf, age_seconds: u64) {
+        let connection = Connection::open(db_path).expect("open sqlite db for rebuild aging");
+        connection
+            .execute(
+                "UPDATE maintenance_jobs
+                 SET created_at = datetime('now', ?1)
+                 WHERE job_type = 'rebuild'
+                   AND namespace = 'default'",
+                [format!("-{age_seconds} seconds")],
+            )
+            .expect("age rebuild jobs");
+    }
+
+    fn assert_metric_value_at_least(body: &str, metric_name: &str, min_value: f64) {
+        let line = body
+            .lines()
+            .find(|line| line.starts_with(metric_name))
+            .unwrap_or_else(|| panic!("missing metric line for {metric_name}"));
+        let value = line
+            .split_whitespace()
+            .last()
+            .unwrap_or_else(|| panic!("missing metric value for {metric_name}"))
+            .parse::<f64>()
+            .unwrap_or_else(|error| panic!("invalid metric value for {metric_name}: {error}"));
+        assert!(
+            value >= min_value,
+            "expected {metric_name} >= {min_value}, got {value}"
+        );
     }
 
     fn heavy_rebuild_content(prefix: &str, index: usize) -> String {

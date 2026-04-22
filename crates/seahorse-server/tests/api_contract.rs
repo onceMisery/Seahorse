@@ -284,6 +284,8 @@ async fn metrics_endpoint_matches_formal_text_contract() {
     assert!(body.contains("seahorse_health_status{status=\"ok\"} 1"));
     assert!(body.contains("seahorse_repair_queue_tasks{status=\"pending\"}"));
     assert!(body.contains("seahorse_rebuild_jobs{status=\"queued\"}"));
+    assert!(body.contains("seahorse_repair_oldest_task_age_seconds"));
+    assert!(body.contains("seahorse_rebuild_oldest_active_job_age_seconds"));
 }
 
 async fn json_request(app: &Router, method: Method, uri: &str, body: Option<Value>) -> Value {

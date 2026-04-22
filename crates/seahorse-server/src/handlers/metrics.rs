@@ -168,6 +168,28 @@ fn append_runtime_metrics(lines: &mut Vec<String>, runtime: &MetricsSnapshot) {
 
     append_metric_help(
         lines,
+        "seahorse_repair_oldest_task_age_seconds",
+        "Age in seconds of the oldest repair queue task that still requires attention.",
+        "gauge",
+    );
+    lines.push(format!(
+        "seahorse_repair_oldest_task_age_seconds {}",
+        runtime.repair_oldest_task_age_seconds.unwrap_or(0.0)
+    ));
+
+    append_metric_help(
+        lines,
+        "seahorse_rebuild_oldest_active_job_age_seconds",
+        "Age in seconds of the oldest active rebuild job.",
+        "gauge",
+    );
+    lines.push(format!(
+        "seahorse_rebuild_oldest_active_job_age_seconds {}",
+        runtime.rebuild_oldest_active_job_age_seconds.unwrap_or(0.0)
+    ));
+
+    append_metric_help(
+        lines,
         "seahorse_index_state",
         "Current index state as a one-hot gauge.",
         "gauge",

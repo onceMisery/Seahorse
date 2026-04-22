@@ -8,6 +8,7 @@
 4. `mvp-release-checklist.md`
 5. `runbooks/mvp-deploy-backup-rollback.md`
 6. `reports/2026-03-26-mvp-release-readiness.md`
+7. `handoff/2026-04-22-mvp-release-handoff.md`
 
 ## 其他文档
 
@@ -21,8 +22,12 @@
   发布前核对项、已关闭的 release blocker 证据、剩余待收口事项。
 - `runbooks/mvp-deploy-backup-rollback.md`
   部署、备份、回滚、rebuild、health / stats / metrics 巡检手册。
+- `runbooks/mvp-alert-rules.example.yaml`
+  Prometheus 告警规则样例，覆盖 health failed、repair deadletter、repair backlog stall、rebuild stall、HTTP error rate。
 - `reports/2026-03-26-mvp-release-readiness.md`
   当前 release readiness 证据汇总，包括测试命令、通过情况与性能基线结果。
+- `handoff/2026-04-22-mvp-release-handoff.md`
+  当前发布候选状态、已完成能力、验证证据与剩余外部 blocker 的最终交接摘要。
 - `mvp-issue-breakdown.md`
   MVP issue 拆解和历史工作分批信息。
 - `mvp-config.example.toml`
