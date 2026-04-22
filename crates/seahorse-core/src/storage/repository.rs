@@ -410,6 +410,12 @@ impl SqliteRepository {
         Ok(records)
     }
 
+    pub fn rebuild_connectome(&mut self, namespace: &str) -> StorageResult<()> {
+        self.with_transaction(|transaction| {
+            rebuild_connectome_in_transaction(transaction, namespace)
+        })
+    }
+
     pub fn with_transaction<T, F>(&mut self, operation: F) -> StorageResult<T>
     where
         F: FnOnce(&Transaction<'_>) -> StorageResult<T>,
@@ -1651,6 +1657,45 @@ fn upsert_connectome_edge(
     Ok(())
 }
 
+fn rebuild_connectome_in_transaction(
+    transaction: &Transaction<'_>,
+    namespace: &str,
+) -> StorageResult<()> {
+    transaction.execute("DELETE FROM connectome WHERE namespace = ?1", [namespace])?;
+
+    let mut statement = transaction.prepare(
+        "SELECT
+            ct.chunk_id,
+            ct.tag_id
+         FROM chunk_tags ct
+         JOIN chunks c ON c.id = ct.chunk_id
+         JOIN files f ON f.id = c.file_id
+         JOIN tags t ON t.id = ct.tag_id
+         WHERE c.namespace = ?1
+           AND f.namespace = ?1
+           AND t.namespace = ?1
+           AND c.is_deleted = 0
+           AND c.index_status != 'deleted'
+           AND f.ingest_status != 'deleted'
+         ORDER BY ct.chunk_id ASC, ct.tag_id ASC",
+    )?;
+    let rows = statement.query_map([namespace], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+    })?;
+
+    let mut tag_ids_by_chunk = BTreeMap::<i64, Vec<i64>>::new();
+    for row in rows {
+        let (chunk_id, tag_id) = row?;
+        tag_ids_by_chunk.entry(chunk_id).or_default().push(tag_id);
+    }
+
+    for tag_ids in tag_ids_by_chunk.into_values() {
+        update_connectome_for_chunk_tags(transaction, namespace, &tag_ids)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
@@ -2347,5 +2392,82 @@ mod tests {
         assert_eq!(neighbors[0].target_tag, "rust");
         assert_eq!(neighbors[0].cooccur_count, 2);
         assert_eq!(neighbors[0].weight, 2.0);
+    }
+
+    #[test]
+    fn rebuild_connectome_drops_edges_from_deleted_files() {
+        let mut repository = repository_with_schema();
+        let first = repository
+            .write_ingest_batch(&IngestWriteBatch {
+                file: FileWrite::new("first.txt", "hash-connectome-live-first"),
+                chunks: vec![ChunkWrite::new(
+                    0,
+                    "project rust live",
+                    "chunk-connectome-live-first",
+                    "test-model",
+                    3,
+                )],
+                tags: vec![
+                    TagWrite::new("Project", "project"),
+                    TagWrite::new("Rust", "rust"),
+                ],
+                chunk_tags: vec![
+                    ChunkTagInsert::new(0, "project"),
+                    ChunkTagInsert::new(0, "rust"),
+                ],
+            })
+            .expect("write first connectome batch");
+        repository
+            .write_ingest_batch(&IngestWriteBatch {
+                file: FileWrite::new("second.txt", "hash-connectome-live-second"),
+                chunks: vec![ChunkWrite::new(
+                    0,
+                    "project memory live",
+                    "chunk-connectome-live-second",
+                    "test-model",
+                    3,
+                )],
+                tags: vec![
+                    TagWrite::new("Project", "project"),
+                    TagWrite::new("Memory", "memory"),
+                ],
+                chunk_tags: vec![
+                    ChunkTagInsert::new(0, "project"),
+                    ChunkTagInsert::new(0, "memory"),
+                ],
+            })
+            .expect("write second connectome batch");
+
+        repository
+            .soft_delete_files("default", &[first.file.id])
+            .expect("soft delete first file");
+
+        let stale_neighbors = repository
+            .list_connectome_neighbors("default", "project", 10)
+            .expect("list stale neighbors");
+        assert!(
+            stale_neighbors.iter().any(|edge| edge.target_tag == "rust"),
+            "soft delete should leave stale connectome edge before rebuild"
+        );
+
+        repository
+            .rebuild_connectome("default")
+            .expect("rebuild connectome");
+
+        let rebuilt_neighbors = repository
+            .list_connectome_neighbors("default", "project", 10)
+            .expect("list rebuilt neighbors");
+        assert!(
+            rebuilt_neighbors
+                .iter()
+                .all(|edge| edge.target_tag != "rust"),
+            "deleted file edge should be removed after connectome rebuild"
+        );
+        assert!(
+            rebuilt_neighbors
+                .iter()
+                .any(|edge| edge.target_tag == "memory"),
+            "active file edge should remain after connectome rebuild"
+        );
     }
 }

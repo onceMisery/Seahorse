@@ -154,6 +154,7 @@ where
         let chunks = self.repository.list_rebuild_chunks(namespace)?;
         let entries = self.build_entries(&chunks)?;
         self.vector_index.rebuild(&entries)?;
+        self.repository.rebuild_connectome(namespace)?;
 
         let chunk_ids = chunks
             .iter()
@@ -228,7 +229,8 @@ mod tests {
     use crate::embedding::{EmbeddingProvider, StubEmbeddingProvider};
     use crate::index::{InMemoryVectorIndex, SearchRequest, VectorIndex};
     use crate::storage::{
-        apply_sqlite_migrations, ChunkWrite, FileWrite, IngestWriteBatch, SqliteRepository,
+        apply_sqlite_migrations, ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch,
+        SqliteRepository, TagWrite,
     };
 
     fn repository_with_schema() -> SqliteRepository {
@@ -349,5 +351,68 @@ mod tests {
 
         assert_eq!(file.ingest_status, "ready");
         assert_eq!(repaired_chunk.index_status, "ready");
+    }
+
+    #[test]
+    fn rebuild_all_restores_connectome_from_active_chunks() {
+        let mut repository = repository_with_schema();
+        repository
+            .write_ingest_batch(&IngestWriteBatch {
+                file: FileWrite::new("first.txt", "hash-rebuild-connectome-first"),
+                chunks: vec![ChunkWrite::new(
+                    0,
+                    "project rust rebuild",
+                    "chunk-rebuild-connectome-first",
+                    "stub-4d",
+                    4,
+                )],
+                tags: vec![
+                    TagWrite::new("Project", "project"),
+                    TagWrite::new("Rust", "rust"),
+                ],
+                chunk_tags: vec![
+                    ChunkTagInsert::new(0, "project"),
+                    ChunkTagInsert::new(0, "rust"),
+                ],
+            })
+            .expect("write first connectome file");
+        let second = repository
+            .write_ingest_batch(&IngestWriteBatch {
+                file: FileWrite::new("second.txt", "hash-rebuild-connectome-second"),
+                chunks: vec![ChunkWrite::new(
+                    0,
+                    "project memory rebuild",
+                    "chunk-rebuild-connectome-second",
+                    "stub-4d",
+                    4,
+                )],
+                tags: vec![
+                    TagWrite::new("Project", "project"),
+                    TagWrite::new("Memory", "memory"),
+                ],
+                chunk_tags: vec![
+                    ChunkTagInsert::new(0, "project"),
+                    ChunkTagInsert::new(0, "memory"),
+                ],
+            })
+            .expect("write second connectome file");
+
+        repository
+            .soft_delete_files("default", &[second.file.id])
+            .expect("soft delete second file");
+
+        let provider = StubEmbeddingProvider::from_dimension(4).expect("stub provider");
+        let mut index = InMemoryVectorIndex::new(provider.dimension());
+        let mut pipeline = RebuildPipeline::new(&mut repository, &provider, &mut index);
+        pipeline
+            .rebuild(RebuildRequest::default())
+            .expect("rebuild all should restore connectome");
+
+        let neighbors = repository
+            .list_connectome_neighbors("default", "project", 10)
+            .expect("list rebuilt connectome neighbors");
+
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].target_tag, "rust");
     }
 }
