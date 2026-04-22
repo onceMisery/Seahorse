@@ -500,6 +500,40 @@ impl SqliteRepository {
         Ok(self.connection.last_insert_rowid())
     }
 
+    pub fn find_active_repair_task(
+        &self,
+        namespace: &str,
+        task_type: &str,
+        target_type: &str,
+    ) -> StorageResult<Option<RepairTask>> {
+        self.connection
+            .query_row(
+                "SELECT
+                    id,
+                    namespace,
+                    task_type,
+                    target_type,
+                    target_id,
+                    payload_json,
+                    status,
+                    retry_count,
+                    last_error,
+                    created_at,
+                    updated_at
+                 FROM repair_queue
+                 WHERE namespace = ?1
+                   AND task_type = ?2
+                   AND target_type = ?3
+                   AND status IN ('pending', 'running')
+                 ORDER BY id ASC
+                 LIMIT 1",
+                params![namespace, task_type, target_type],
+                map_repair_task,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn claim_next_repair_task(
         &mut self,
         namespace: &str,
@@ -2469,5 +2503,40 @@ mod tests {
                 .any(|edge| edge.target_tag == "memory"),
             "active file edge should remain after connectome rebuild"
         );
+    }
+
+    #[test]
+    fn finds_active_repair_task_by_type() {
+        let mut repository = repository_with_schema();
+        repository
+            .enqueue_repair_task(
+                "default",
+                "connectome_rebuild",
+                "namespace",
+                None,
+                Some("{\"deleted_chunk_ids\":[1],\"reason\":\"forget_soft_delete\"}"),
+            )
+            .expect("enqueue active repair task");
+        let completed_id = repository
+            .enqueue_repair_task(
+                "default",
+                "connectome_rebuild",
+                "namespace",
+                None,
+                Some("{\"deleted_chunk_ids\":[2],\"reason\":\"forget_soft_delete\"}"),
+            )
+            .expect("enqueue second repair task");
+        repository
+            .succeed_repair_task(completed_id)
+            .expect("mark second repair task succeeded");
+
+        let active = repository
+            .find_active_repair_task("default", "connectome_rebuild", "namespace")
+            .expect("find active repair task")
+            .expect("active repair task should exist");
+
+        assert_eq!(active.task_type, "connectome_rebuild");
+        assert_eq!(active.target_type, "namespace");
+        assert_eq!(active.status, "pending");
     }
 }

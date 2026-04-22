@@ -190,6 +190,14 @@ where
         namespace: &str,
         deleted_chunk_ids: &[i64],
     ) -> Result<(), ForgetError> {
+        if self
+            .repository
+            .find_active_repair_task(namespace, "connectome_rebuild", "namespace")?
+            .is_some()
+        {
+            return Ok(());
+        }
+
         let payload = build_connectome_rebuild_payload(deleted_chunk_ids);
         self.repository.enqueue_repair_task(
             namespace,
@@ -405,6 +413,48 @@ mod tests {
             .expect_err("hard mode should be rejected");
 
         assert!(error.to_string().contains("only mode=soft"));
+    }
+
+    #[test]
+    fn deduplicates_connectome_rebuild_repairs_across_forgets() {
+        let mut repository = repository_with_schema();
+        let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
+        let mut index = InMemoryVectorIndex::new(4);
+
+        let first = IngestPipeline::new(&mut repository, &provider, &mut index)
+            .ingest(IngestRequest::new("first forget target"))
+            .expect("ingest first");
+        let second = IngestPipeline::new(&mut repository, &provider, &mut index)
+            .ingest(IngestRequest::new("second forget target"))
+            .expect("ingest second");
+
+        let mut forget_pipeline = ForgetPipeline::new(&mut repository, &mut index);
+        forget_pipeline
+            .forget(ForgetRequest::for_file(first.file_id))
+            .expect("forget first file");
+        forget_pipeline
+            .forget(ForgetRequest::for_file(second.file_id))
+            .expect("forget second file");
+
+        let active = repository
+            .find_active_repair_task("default", "connectome_rebuild", "namespace")
+            .expect("find active connectome rebuild")
+            .expect("connectome rebuild task should exist");
+        assert_eq!(active.task_type, "connectome_rebuild");
+
+        let claimed = repository
+            .claim_next_repair_task("default", 3)
+            .expect("claim first repair task")
+            .expect("repair task should exist");
+        assert_eq!(claimed.id, active.id);
+        assert_eq!(claimed.task_type, "connectome_rebuild");
+        assert!(
+            repository
+                .claim_next_repair_task("default", 3)
+                .expect("claim second repair task")
+                .is_none(),
+            "expected only one connectome rebuild task to be queued"
+        );
     }
 
     #[derive(Debug, Default)]
