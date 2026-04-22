@@ -10,6 +10,8 @@ const INDEX_STATES: &[&str] = &["ready", "rebuilding", "degraded", "unavailable"
 const HEALTH_STATUSES: &[&str] = &["ok", "degraded", "failed"];
 const REPAIR_QUEUE_STATUSES: &[&str] = &["pending", "running", "failed", "deadletter", "succeeded"];
 const REBUILD_JOB_STATUSES: &[&str] = &["queued", "running", "succeeded", "failed", "cancelled"];
+const RECALL_WORLDVIEWS: &[&str] = &["default", "technical", "creative", "emotional"];
+const RECALL_RESULT_SOURCES: &[&str] = &["vector", "weak_signal", "spike_association"];
 
 pub async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
     match render_metrics(&state) {
@@ -229,6 +231,91 @@ fn append_runtime_metrics(lines: &mut Vec<String>, runtime: &MetricsSnapshot) {
     if !health_status_known {
         lines.push("seahorse_health_status{status=\"unknown\"} 1".to_owned());
     }
+
+    append_metric_help(
+        lines,
+        "seahorse_recall_recent_total",
+        "Recent retrieval_log sample size used for recall telemetry.",
+        "gauge",
+    );
+    lines.push(format!(
+        "seahorse_recall_recent_total {}",
+        runtime.recall_telemetry.sample_count
+    ));
+
+    append_status_count_metric(
+        lines,
+        "seahorse_recall_recent_worldviews",
+        "Recent recall worldview distribution.",
+        RECALL_WORLDVIEWS,
+        &runtime.recall_telemetry.worldview_counts,
+    );
+
+    append_metric_help(
+        lines,
+        "seahorse_recall_recent_entropy_avg",
+        "Average entropy across recent recalls.",
+        "gauge",
+    );
+    lines.push(format!(
+        "seahorse_recall_recent_entropy_avg {}",
+        runtime.recall_telemetry.average_entropy.unwrap_or(0.0)
+    ));
+
+    append_metric_help(
+        lines,
+        "seahorse_recall_recent_spike_depth_avg",
+        "Average spike depth across recent recalls.",
+        "gauge",
+    );
+    lines.push(format!(
+        "seahorse_recall_recent_spike_depth_avg {}",
+        runtime.recall_telemetry.average_spike_depth.unwrap_or(0.0)
+    ));
+
+    append_metric_help(
+        lines,
+        "seahorse_recall_recent_emergent_total",
+        "Total emergent recall count across recent recalls.",
+        "gauge",
+    );
+    lines.push(format!(
+        "seahorse_recall_recent_emergent_total {}",
+        runtime.recall_telemetry.emergent_total
+    ));
+
+    append_metric_help(
+        lines,
+        "seahorse_recall_recent_results_total",
+        "Total recent recall results grouped by source.",
+        "gauge",
+    );
+    for source in RECALL_RESULT_SOURCES {
+        let value = match *source {
+            "vector" => runtime.recall_telemetry.vector_result_total,
+            "weak_signal" => 0,
+            "spike_association" => runtime.recall_telemetry.association_result_total,
+            _ => 0,
+        };
+        lines.push(format!(
+            "seahorse_recall_recent_results_total{{source=\"{source}\"}} {value}"
+        ));
+    }
+
+    append_metric_help(
+        lines,
+        "seahorse_recall_recent_association_gate_total",
+        "Recent tagmemo association gate decisions.",
+        "gauge",
+    );
+    lines.push(format!(
+        "seahorse_recall_recent_association_gate_total{{decision=\"allowed\"}} {}",
+        runtime.recall_telemetry.association_allowed_total
+    ));
+    lines.push(format!(
+        "seahorse_recall_recent_association_gate_total{{decision=\"blocked\"}} {}",
+        runtime.recall_telemetry.association_blocked_total
+    ));
 }
 
 fn append_status_count_metric(

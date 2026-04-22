@@ -823,6 +823,97 @@ mod tests {
         cleanup_db_path(&db_path);
     }
 
+    #[tokio::test]
+    async fn metrics_endpoint_exposes_recent_recall_telemetry() {
+        let (state, db_path) = test_state("metrics-recall-telemetry");
+
+        let mut connectome_request = CoreIngestRequest::new("project rust anchor".to_owned());
+        connectome_request.filename = "connectome.txt".to_owned();
+        connectome_request.tags = vec!["project".to_owned(), "rust".to_owned()];
+        state.ingest(connectome_request).expect("seed connectome");
+
+        let mut associated_request = CoreIngestRequest::new("rust compiler deep dive".to_owned());
+        associated_request.filename = "rust.txt".to_owned();
+        associated_request.tags = vec!["rust".to_owned()];
+        state
+            .ingest(associated_request)
+            .expect("seed associated chunk");
+
+        let app = build_app(state);
+
+        for body in [
+            json!({
+                "namespace": "default",
+                "query": "project",
+                "mode": "tagmemo"
+            }),
+            json!({
+                "namespace": "default",
+                "query": "care feel grief",
+                "mode": "tagmemo"
+            }),
+            json!({
+                "namespace": "default",
+                "query": "rust vector index recall",
+                "mode": "basic"
+            }),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/recall")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string()))
+                        .expect("build recall request"),
+                )
+                .await
+                .expect("execute recall request");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("build metrics request"),
+            )
+            .await
+            .expect("execute metrics request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_text_body(response).await;
+        assert!(body.contains("seahorse_recall_recent_total 3"));
+        assert!(body.contains("seahorse_recall_recent_worldviews{status=\"default\"} 1"));
+        assert!(body.contains("seahorse_recall_recent_worldviews{status=\"technical\"} 1"));
+        assert!(body.contains("seahorse_recall_recent_worldviews{status=\"emotional\"} 1"));
+        assert_metric_value_at_least(
+            &body,
+            "seahorse_recall_recent_association_gate_total{decision=\"allowed\"}",
+            1.0,
+        );
+        assert_metric_value_at_least(
+            &body,
+            "seahorse_recall_recent_association_gate_total{decision=\"blocked\"}",
+            1.0,
+        );
+        assert_metric_value_at_least(
+            &body,
+            "seahorse_recall_recent_results_total{source=\"vector\"}",
+            1.0,
+        );
+        assert!(body.contains(
+            "seahorse_recall_recent_results_total{source=\"spike_association\"} 0"
+        ));
+        assert_metric_value_at_least(&body, "seahorse_recall_recent_entropy_avg", 0.0);
+        assert!(body.contains("seahorse_recall_recent_emergent_total 0"));
+
+        cleanup_db_path(&db_path);
+    }
+
     fn test_state(name: &str) -> (AppState, PathBuf) {
         let db_path = unique_db_path(name);
         let state = AppState::new_with_db_path(

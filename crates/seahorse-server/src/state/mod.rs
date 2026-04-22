@@ -13,12 +13,13 @@ use seahorse_core::{
     IngestResult as CoreIngestResult, MaintenanceJob, RebuildChunkRecord, RebuildError,
     RebuildRequest as CoreRebuildRequest, RebuildScope, RecallError, RecallPipeline,
     RecallRequest as CoreRecallRequest, RecallResult as CoreRecallResult, RepairTask,
-    RepairTaskExecutor, RepairWorker, RepairWorkerConfig, RepairWorkerRunResult, SqliteRepository,
-    StatusCount as CoreStatusCount, StorageError, StubEmbeddingProvider, VectorIndex,
+    RepairTaskExecutor, RepairWorker, RepairWorkerConfig, RepairWorkerRunResult,
+    RetrievalLogRecord, SqliteRepository, StatusCount as CoreStatusCount, StorageError,
+    StubEmbeddingProvider, VectorIndex,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
 
 use crate::config::{load_server_config_default, ServerConfig};
@@ -26,6 +27,7 @@ use crate::config::{load_server_config_default, ServerConfig};
 const DEFAULT_NAMESPACE: &str = "default";
 const REPAIR_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const REPAIR_RECOVERY_ERROR: &str = "repair task recovered after unclean shutdown";
+const RECENT_RECALL_METRICS_LIMIT: usize = 100;
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -254,6 +256,20 @@ pub struct MetricsSnapshot {
     pub rebuild_job_statuses: Vec<StatusCountSnapshot>,
     pub repair_oldest_task_age_seconds: Option<f64>,
     pub rebuild_oldest_active_job_age_seconds: Option<f64>,
+    pub recall_telemetry: RecallTelemetrySnapshot,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RecallTelemetrySnapshot {
+    pub sample_count: usize,
+    pub worldview_counts: Vec<StatusCountSnapshot>,
+    pub average_entropy: Option<f64>,
+    pub average_spike_depth: Option<f64>,
+    pub emergent_total: i64,
+    pub vector_result_total: i64,
+    pub association_result_total: i64,
+    pub association_allowed_total: usize,
+    pub association_blocked_total: usize,
 }
 
 #[derive(Debug)]
@@ -646,6 +662,8 @@ impl AppState {
             .repository
             .load_oldest_active_maintenance_job_age_seconds("rebuild", DEFAULT_NAMESPACE)
             .map_err(AppStateError::Storage)?;
+        let recall_telemetry = build_recall_telemetry_snapshot(&services.repository)
+            .map_err(AppStateError::Storage)?;
         let vector_index = self
             .vector_index
             .lock()
@@ -671,6 +689,7 @@ impl AppState {
             rebuild_job_statuses,
             repair_oldest_task_age_seconds,
             rebuild_oldest_active_job_age_seconds,
+            recall_telemetry,
         })
     }
 }
@@ -1676,6 +1695,89 @@ fn map_status_count(value: CoreStatusCount) -> StatusCountSnapshot {
         status: value.status,
         count: value.count,
     }
+}
+
+fn build_recall_telemetry_snapshot(
+    repository: &SqliteRepository,
+) -> Result<RecallTelemetrySnapshot, StorageError> {
+    let logs = repository.list_retrieval_logs(DEFAULT_NAMESPACE, RECENT_RECALL_METRICS_LIMIT)?;
+    Ok(summarize_recent_recall_logs(&logs))
+}
+
+fn summarize_recent_recall_logs(logs: &[RetrievalLogRecord]) -> RecallTelemetrySnapshot {
+    if logs.is_empty() {
+        return RecallTelemetrySnapshot::default();
+    }
+
+    let mut worldview_counts = std::collections::BTreeMap::<String, usize>::new();
+    let mut entropy_sum = 0.0_f64;
+    let mut entropy_count = 0_usize;
+    let mut spike_depth_sum = 0.0_f64;
+    let mut spike_depth_count = 0_usize;
+    let mut emergent_total = 0_i64;
+    let mut vector_result_total = 0_i64;
+    let mut association_result_total = 0_i64;
+    let mut association_allowed_total = 0_usize;
+    let mut association_blocked_total = 0_usize;
+
+    for log in logs {
+        let worldview = log.worldview.as_deref().unwrap_or("unknown").to_owned();
+        *worldview_counts.entry(worldview).or_insert(0) += 1;
+
+        if let Some(entropy) = log.entropy {
+            entropy_sum += entropy;
+            entropy_count += 1;
+        }
+
+        if let Some(spike_depth) = log.spike_depth {
+            spike_depth_sum += spike_depth as f64;
+            spike_depth_count += 1;
+        }
+
+        emergent_total += log.emergent_count.unwrap_or_default();
+
+        if let Some(snapshot) = parse_params_snapshot(log.params_snapshot.as_deref()) {
+            vector_result_total += read_i64_field(&snapshot, "vector_result_count");
+            association_result_total += read_i64_field(&snapshot, "association_result_count");
+
+            match snapshot.get("association_allowed").and_then(Value::as_bool) {
+                Some(true) => association_allowed_total += 1,
+                Some(false) => association_blocked_total += 1,
+                None => {}
+            }
+        }
+    }
+
+    RecallTelemetrySnapshot {
+        sample_count: logs.len(),
+        worldview_counts: worldview_counts
+            .into_iter()
+            .map(|(status, count)| StatusCountSnapshot { status, count })
+            .collect(),
+        average_entropy: (entropy_count > 0).then_some(entropy_sum / entropy_count as f64),
+        average_spike_depth: (spike_depth_count > 0)
+            .then_some(spike_depth_sum / spike_depth_count as f64),
+        emergent_total,
+        vector_result_total,
+        association_result_total,
+        association_allowed_total,
+        association_blocked_total,
+    }
+}
+
+fn parse_params_snapshot(snapshot: Option<&str>) -> Option<Value> {
+    let snapshot = snapshot?;
+    match serde_json::from_str::<Value>(snapshot) {
+        Ok(Value::Object(object)) => Some(Value::Object(object)),
+        _ => None,
+    }
+}
+
+fn read_i64_field(snapshot: &Value, key: &str) -> i64 {
+    snapshot
+        .get(key)
+        .and_then(Value::as_i64)
+        .unwrap_or_default()
 }
 
 fn load_job(repository: &SqliteRepository, job_id: i64) -> Result<MaintenanceJob, AppStateError> {
