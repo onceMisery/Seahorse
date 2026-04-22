@@ -163,6 +163,10 @@ fn validate_repair_task(task: &RepairTask) -> Result<(), String> {
             validate_target_type(task, &["file", "chunk"])?;
             validate_payload_keys(task, &["chunk_ids", "error"])
         }
+        "connectome_rebuild" => {
+            validate_target_type(task, &["namespace"])?;
+            validate_payload_keys(task, &["deleted_chunk_ids", "reason"])
+        }
         other => Err(format!("unsupported repair task_type: {other}")),
     }
 }
@@ -195,4 +199,37 @@ fn validate_payload_keys(task: &RepairTask, required_keys: &[&str]) -> Result<()
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_repair_task;
+    use crate::storage::RepairTask;
+
+    fn repair_task(task_type: &str, target_type: &str, payload_json: &str) -> RepairTask {
+        RepairTask {
+            id: 1,
+            namespace: "default".to_owned(),
+            task_type: task_type.to_owned(),
+            target_type: target_type.to_owned(),
+            target_id: None,
+            payload_json: Some(payload_json.to_owned()),
+            status: "queued".to_owned(),
+            retry_count: 0,
+            last_error: None,
+            created_at: "2026-04-22T00:00:00Z".to_owned(),
+            updated_at: "2026-04-22T00:00:00Z".to_owned(),
+        }
+    }
+
+    #[test]
+    fn accepts_connectome_rebuild_repair_tasks() {
+        let task = repair_task(
+            "connectome_rebuild",
+            "namespace",
+            "{\"deleted_chunk_ids\":[1,2],\"reason\":\"forget_soft_delete\"}",
+        );
+
+        validate_repair_task(&task).expect("connectome rebuild task should validate");
+    }
 }

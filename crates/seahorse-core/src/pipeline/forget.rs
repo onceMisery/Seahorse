@@ -145,6 +145,8 @@ where
             });
         }
 
+        self.enqueue_connectome_rebuild_task(&request.namespace, &deletion.deleted_chunk_ids)?;
+
         match self
             .vector_index
             .mark_deleted(&request.namespace, &deletion.deleted_chunk_ids)
@@ -181,6 +183,22 @@ where
                 })
             }
         }
+    }
+
+    fn enqueue_connectome_rebuild_task(
+        &mut self,
+        namespace: &str,
+        deleted_chunk_ids: &[i64],
+    ) -> Result<(), ForgetError> {
+        let payload = build_connectome_rebuild_payload(deleted_chunk_ids);
+        self.repository.enqueue_repair_task(
+            namespace,
+            "connectome_rebuild",
+            "namespace",
+            None,
+            Some(&payload),
+        )?;
+        Ok(())
     }
 }
 
@@ -252,6 +270,15 @@ fn build_delete_repair_payload(
     )
 }
 
+fn build_connectome_rebuild_payload(chunk_ids: &[i64]) -> String {
+    let chunk_ids_json = chunk_ids
+        .iter()
+        .map(|chunk_id| chunk_id.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{\"deleted_chunk_ids\":[{chunk_ids_json}],\"reason\":\"forget_soft_delete\"}}")
+}
+
 fn escape_json(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -301,6 +328,18 @@ mod tests {
         assert_eq!(result.index_cleanup_status, "completed");
         assert!(result.repair_task_id.is_none());
         assert!(recall.results.is_empty());
+
+        let repair_task = repository
+            .claim_next_repair_task("default", 3)
+            .expect("claim connectome rebuild task")
+            .expect("connectome rebuild task should exist");
+        assert_eq!(repair_task.task_type, "connectome_rebuild");
+        assert_eq!(repair_task.target_type, "namespace");
+        assert!(repair_task
+            .payload_json
+            .as_deref()
+            .unwrap_or("")
+            .contains("forget_soft_delete"));
     }
 
     #[test]

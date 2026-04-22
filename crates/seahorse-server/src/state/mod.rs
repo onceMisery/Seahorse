@@ -210,6 +210,12 @@ struct IndexDeleteRepairPayload {
     error: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ConnectomeRebuildRepairPayload {
+    deleted_chunk_ids: Vec<i64>,
+    reason: String,
+}
+
 #[derive(Debug)]
 struct ServerRepairTaskExecutor {
     db_path: String,
@@ -1288,6 +1294,42 @@ impl ServerRepairTaskExecutor {
 
         Ok(())
     }
+
+    fn execute_connectome_rebuild(
+        &mut self,
+        task: &RepairTask,
+        payload: ConnectomeRebuildRepairPayload,
+    ) -> Result<(), String> {
+        info!(
+            event = "repair.task.started",
+            task_id = task.id,
+            task_type = "connectome_rebuild",
+            namespace = %task.namespace,
+            deleted_chunk_count = payload.deleted_chunk_ids.len(),
+            "repair task started"
+        );
+        if payload.reason.trim().is_empty() {
+            return Err(format!("repair task {} is missing reason", task.id));
+        }
+
+        let mut repository = open_runtime_repository(&self.db_path)?;
+        repository
+            .rebuild_connectome(&task.namespace)
+            .map_err(|error| {
+                format!("repair task {} connectome rebuild failed: {error}", task.id)
+            })?;
+
+        info!(
+            event = "repair.task.succeeded",
+            task_id = task.id,
+            task_type = "connectome_rebuild",
+            namespace = %task.namespace,
+            deleted_chunk_count = payload.deleted_chunk_ids.len(),
+            "repair task completed"
+        );
+
+        Ok(())
+    }
 }
 
 impl RepairTaskExecutor for ServerRepairTaskExecutor {
@@ -1300,6 +1342,10 @@ impl RepairTaskExecutor for ServerRepairTaskExecutor {
             "index_delete" => {
                 let payload = parse_repair_payload::<IndexDeleteRepairPayload>(task)?;
                 self.execute_index_delete(task, payload)
+            }
+            "connectome_rebuild" => {
+                let payload = parse_repair_payload::<ConnectomeRebuildRepairPayload>(task)?;
+                self.execute_connectome_rebuild(task, payload)
             }
             other => {
                 warn!(
