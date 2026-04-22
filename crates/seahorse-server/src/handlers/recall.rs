@@ -109,6 +109,8 @@ pub async fn post_recall(
         latency_ms = result.metadata.latency_ms,
         degraded = result.metadata.degraded,
         index_state = %result.metadata.index_state,
+        worldview = %result.metadata.worldview.as_deref().unwrap_or("unknown"),
+        entropy = result.metadata.entropy.unwrap_or_default(),
         "recall request completed"
     );
 
@@ -121,6 +123,8 @@ pub async fn post_recall(
             degraded_reason: result.metadata.degraded_reason,
             result_count: result.metadata.result_count,
             index_state: result.metadata.index_state,
+            worldview: result.metadata.worldview,
+            entropy: result.metadata.entropy.map(f64::from),
         },
     })
 }

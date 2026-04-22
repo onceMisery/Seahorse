@@ -8,6 +8,7 @@ use crate::pipeline::hashing::stable_content_hash;
 use crate::pipeline::tagging::resolve_tags;
 use crate::storage::{RecallChunkRecord, RetrievalLogWrite, SqliteRepository, StorageError};
 use crate::synapse::{Synapse, SynapseConfig};
+use crate::thalamus::{ThalamicAnalysis, Thalamus, ThalamusConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecallFilters {
@@ -64,7 +65,7 @@ pub struct RecallResultItem {
     pub metadata_json: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RecallResponseMetadata {
     pub top_k: usize,
     pub latency_ms: u64,
@@ -72,6 +73,8 @@ pub struct RecallResponseMetadata {
     pub degraded_reason: Option<String>,
     pub result_count: usize,
     pub index_state: String,
+    pub worldview: Option<String>,
+    pub entropy: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -169,6 +172,7 @@ where
         let started_at = Instant::now();
         ensure_not_timed_out(started_at, request.timeout_ms)?;
         let query_text = request.query.trim();
+        let thalamic_analysis = analyze_query_with_thalamus(query_text, request.top_k);
         let query_embedding = self.embedding_provider.embed(query_text)?;
         ensure_not_timed_out(started_at, request.timeout_ms)?;
         if query_embedding.len() != self.embedding_provider.dimension() {
@@ -214,6 +218,8 @@ where
         let total_time_us = recall_duration.as_micros().min(i64::MAX as u128) as i64;
         let query_hash = stable_content_hash(query_text);
         let retrieval_log = RetrievalLogWrite::new(query_text, query_hash, request.mode.as_str())
+            .with_worldview(thalamic_analysis.worldview.clone())
+            .with_entropy(f64::from(thalamic_analysis.entropy))
             .with_result_count(results.len() as i64)
             .with_total_time_us(total_time_us)
             .with_params_snapshot(build_retrieval_log_params_snapshot(&request));
@@ -228,10 +234,16 @@ where
                 degraded_reason: None,
                 result_count: results.len(),
                 index_state: "ready".to_owned(),
+                worldview: Some(thalamic_analysis.worldview),
+                entropy: Some(thalamic_analysis.entropy),
             },
             results,
         })
     }
+}
+
+fn analyze_query_with_thalamus(query_text: &str, top_k: usize) -> ThalamicAnalysis {
+    Thalamus::new(ThalamusConfig::default()).analyze(query_text, top_k)
 }
 
 fn validate_request(request: &RecallRequest) -> Result<(), RecallError> {
@@ -656,9 +668,13 @@ mod tests {
             .expect("list retrieval logs");
 
         assert_eq!(result.results.len(), 1);
+        assert_eq!(result.metadata.worldview.as_deref(), Some("default"));
+        assert!(result.metadata.entropy.is_some());
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].mode, "basic");
         assert_eq!(logs[0].query_text, "alpha recall log");
+        assert_eq!(logs[0].worldview.as_deref(), Some("default"));
+        assert!(logs[0].entropy.is_some());
         assert_eq!(logs[0].result_count, 1);
         assert!(logs[0].total_time_us.is_some());
         assert!(logs[0].params_snapshot.is_some());
@@ -678,8 +694,12 @@ mod tests {
             .expect("list retrieval logs");
 
         assert!(result.results.is_empty());
+        assert_eq!(result.metadata.worldview.as_deref(), Some("default"));
+        assert!(result.metadata.entropy.is_some());
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].query_text, "missing recall log");
+        assert_eq!(logs[0].worldview.as_deref(), Some("default"));
+        assert!(logs[0].entropy.is_some());
         assert_eq!(logs[0].result_count, 0);
     }
 

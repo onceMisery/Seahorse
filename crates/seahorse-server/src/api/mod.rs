@@ -162,6 +162,10 @@ pub struct RecallResponseMetadata {
     pub degraded_reason: Option<String>,
     pub result_count: usize,
     pub index_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worldview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entropy: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]

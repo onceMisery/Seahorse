@@ -469,6 +469,11 @@ mod tests {
         assert_eq!(body["success"], Value::Bool(true));
         assert_eq!(body["error"], Value::Null);
         assert!(body["data"]["results"].is_array());
+        assert_eq!(
+            body["data"]["metadata"]["worldview"],
+            Value::String("default".to_owned())
+        );
+        assert!(body["data"]["metadata"]["entropy"].is_number());
 
         cleanup_db_path(&db_path);
     }
