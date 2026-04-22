@@ -17,6 +17,8 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn loads_runtime_config_from_toml() {
+    let _guard = LegacyEnvGuard::new(None, None);
+
     let config = load_server_config(
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/seahorse.test.toml"),
@@ -34,6 +36,8 @@ fn loads_runtime_config_from_toml() {
 
 #[test]
 fn runtime_config_rejects_unsupported_documented_keys() {
+    let _guard = LegacyEnvGuard::new(None, None);
+
     let path = write_temp_config(
         r#"
 [storage]
@@ -102,6 +106,8 @@ allow_public_bind = false
 
 #[test]
 fn runtime_config_rejects_unknown_field_in_known_section() {
+    let _guard = LegacyEnvGuard::new(None, None);
+
     let path = write_temp_config(
         r#"
 [storage]
@@ -122,6 +128,8 @@ unexpected = true
 
 #[test]
 fn runtime_config_rejects_unknown_top_level_section() {
+    let _guard = LegacyEnvGuard::new(None, None);
+
     let path = write_temp_config(
         r#"
 [storage]
