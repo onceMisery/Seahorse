@@ -43,6 +43,7 @@
   - `docs/mvp-openapi.yaml`
 - 设计与范围：
   - `docs/mvp-design-and-roadmap.md`
+  - `docs/mvp-final-design.md`
 - 发布检查：
   - `docs/mvp-release-checklist.md`
 - 运行手册：

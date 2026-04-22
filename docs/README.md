@@ -4,13 +4,14 @@
 
 1. `design-all.md`
 2. `mvp-design-and-roadmap.md`
-3. `mvp-openapi.yaml`
-4. `mvp-release-checklist.md`
-5. `runbooks/mvp-deploy-backup-rollback.md`
-6. `reports/2026-03-26-mvp-release-readiness.md`
-7. `handoff/2026-04-22-mvp-release-handoff.md`
-8. `runbooks/mvp-release-execution-checklist.md`
-9. `runbooks/mvp-logging-validation-record-template.md`
+3. `mvp-final-design.md`
+4. `mvp-openapi.yaml`
+5. `mvp-release-checklist.md`
+6. `runbooks/mvp-deploy-backup-rollback.md`
+7. `reports/2026-03-26-mvp-release-readiness.md`
+8. `handoff/2026-04-22-mvp-release-handoff.md`
+9. `runbooks/mvp-release-execution-checklist.md`
+10. `runbooks/mvp-logging-validation-record-template.md`
 
 ## 其他文档
 
@@ -18,6 +19,8 @@
   长期设计背景与范围边界，帮助理解为什么 MVP 只收口 SQLite + vector recall + REST API。
 - `mvp-design-and-roadmap.md`
   MVP 设计基线，定义状态机、主链路、验收门槛与 release gates。
+- `mvp-final-design.md`
+  当前实现态的最终版设计文档，收口当前架构、接口边界、可观测性与发布边界。
 - `mvp-openapi.yaml`
   当前正式 API 契约。
 - `mvp-release-checklist.md`
