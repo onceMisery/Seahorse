@@ -154,6 +154,40 @@ fn append_runtime_metrics(lines: &mut Vec<String>, runtime: &MetricsSnapshot) {
 
     append_metric_help(
         lines,
+        "seahorse_connectome_expected_edge_count",
+        "Expected connectome edge count reconstructed from active chunks.",
+        "gauge",
+    );
+    lines.push(format!(
+        "seahorse_connectome_expected_edge_count {}",
+        runtime.connectome_health.expected_edge_count
+    ));
+
+    append_metric_help(
+        lines,
+        "seahorse_connectome_drift_edges",
+        "Connectome drift edge count by drift type.",
+        "gauge",
+    );
+    lines.push(format!(
+        "seahorse_connectome_drift_edges{{kind=\"missing\"}} {}",
+        runtime.connectome_health.missing_edge_count
+    ));
+    lines.push(format!(
+        "seahorse_connectome_drift_edges{{kind=\"stale\"}} {}",
+        runtime.connectome_health.stale_edge_count
+    ));
+    lines.push(format!(
+        "seahorse_connectome_drift_edges{{kind=\"cooccur_mismatch\"}} {}",
+        runtime.connectome_health.cooccur_mismatch_count
+    ));
+    lines.push(format!(
+        "seahorse_connectome_drift_edges{{kind=\"weight_mismatch\"}} {}",
+        runtime.connectome_health.weight_mismatch_count
+    ));
+
+    append_metric_help(
+        lines,
         "seahorse_deleted_chunk_count",
         "Deleted chunk count.",
         "gauge",

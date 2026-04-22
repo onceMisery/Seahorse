@@ -40,11 +40,11 @@ pub use pipeline::{
 };
 pub use storage::{
     apply_sqlite_migrations, read_schema_meta, validate_schema_meta, CachedEmbedding,
-    ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, MaintenanceJob, PersistedChunk,
-    PersistedDeletion, PersistedFile, PersistedIngest, PersistedReplacement, RebuildChunkRecord,
-    RecallChunkRecord, RepairTask, RetrievalLogRecord, RetrievalLogWrite, SchemaExpectation,
-    SchemaMetaSnapshot, SqliteRepository, StatusCount, StorageError, StorageResult,
-    StorageStatsSnapshot, TagWrite, LATEST_SCHEMA_VERSION,
+    ChunkTagInsert, ChunkWrite, ConnectomeHealthSnapshot, FileWrite, IngestWriteBatch,
+    MaintenanceJob, PersistedChunk, PersistedDeletion, PersistedFile, PersistedIngest,
+    PersistedReplacement, RebuildChunkRecord, RecallChunkRecord, RepairTask, RetrievalLogRecord,
+    RetrievalLogWrite, SchemaExpectation, SchemaMetaSnapshot, SqliteRepository, StatusCount,
+    StorageError, StorageResult, StorageStatsSnapshot, TagWrite, LATEST_SCHEMA_VERSION,
 };
 pub use synapse::{Synapse, SynapseConfig, SynapticSignal};
 pub use thalamus::{ThalamicAnalysis, Thalamus, ThalamusConfig};

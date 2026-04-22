@@ -312,6 +312,27 @@ pub struct StorageStatsSnapshot {
     pub index_status: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ConnectomeHealthSnapshot {
+    pub expected_edge_count: usize,
+    pub actual_edge_count: usize,
+    pub missing_edge_count: usize,
+    pub stale_edge_count: usize,
+    pub cooccur_mismatch_count: usize,
+    pub weight_mismatch_count: usize,
+    pub expected_cooccur_total: usize,
+    pub actual_cooccur_total: usize,
+}
+
+impl ConnectomeHealthSnapshot {
+    pub fn requires_repair(&self) -> bool {
+        self.missing_edge_count > 0
+            || self.stale_edge_count > 0
+            || self.cooccur_mismatch_count > 0
+            || self.weight_mismatch_count > 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusCount {
     pub status: String,

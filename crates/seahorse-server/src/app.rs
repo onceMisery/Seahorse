@@ -806,7 +806,64 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = read_text_body(response).await;
         assert!(body.contains("seahorse_connectome_edge_count 1"));
+        assert!(body.contains("seahorse_connectome_expected_edge_count 1"));
         assert!(body.contains("seahorse_connectome_density 1"));
+        assert!(body.contains("seahorse_connectome_drift_edges{kind=\"missing\"} 0"));
+        assert!(body.contains("seahorse_connectome_drift_edges{kind=\"stale\"} 0"));
+        assert!(body.contains("seahorse_connectome_drift_edges{kind=\"cooccur_mismatch\"} 0"));
+        assert!(body.contains("seahorse_connectome_drift_edges{kind=\"weight_mismatch\"} 0"));
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_exposes_connectome_drift_gauges() {
+        let (state, db_path) = test_state("metrics-connectome-drift");
+
+        let mut connectome_request = CoreIngestRequest::new("project rust first".to_owned());
+        connectome_request.filename = "connectome-1.txt".to_owned();
+        connectome_request.tags = vec!["project".to_owned(), "rust".to_owned()];
+        state
+            .ingest(connectome_request)
+            .expect("seed first connectome");
+
+        let mut second_request = CoreIngestRequest::new("project rust second".to_owned());
+        second_request.filename = "connectome-2.txt".to_owned();
+        second_request.tags = vec!["project".to_owned(), "rust".to_owned()];
+        state
+            .ingest(second_request)
+            .expect("seed second connectome");
+
+        let connection = Connection::open(&db_path).expect("open sqlite db for drift mutation");
+        connection
+            .execute(
+                "UPDATE connectome
+                 SET cooccur_count = 1,
+                     weight = 1.0
+                 WHERE namespace = 'default'",
+                [],
+            )
+            .expect("mutate connectome drift");
+        drop(connection);
+
+        let app = build_app(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("build metrics request"),
+            )
+            .await
+            .expect("execute metrics request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_text_body(response).await;
+        assert!(body.contains("seahorse_connectome_edge_count 1"));
+        assert!(body.contains("seahorse_connectome_expected_edge_count 1"));
+        assert!(body.contains("seahorse_connectome_drift_edges{kind=\"cooccur_mismatch\"} 1"));
+        assert!(body.contains("seahorse_connectome_drift_edges{kind=\"weight_mismatch\"} 1"));
 
         cleanup_db_path(&db_path);
     }

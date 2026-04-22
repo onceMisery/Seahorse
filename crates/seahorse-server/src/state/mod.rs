@@ -7,15 +7,15 @@ use std::time::Duration;
 
 use rusqlite::{params, Connection};
 use seahorse_core::{
-    apply_sqlite_migrations, EmbeddingProvider, ForgetError, ForgetPipeline,
-    ForgetRequest as CoreForgetRequest, ForgetResult as CoreForgetResult, InMemoryVectorIndex,
-    IndexEntry, IndexError, IngestError, IngestPipeline, IngestRequest as CoreIngestRequest,
-    IngestResult as CoreIngestResult, MaintenanceJob, RebuildChunkRecord, RebuildError,
-    RebuildRequest as CoreRebuildRequest, RebuildScope, RecallError, RecallPipeline,
-    RecallRequest as CoreRecallRequest, RecallResult as CoreRecallResult, RepairTask,
-    RepairTaskExecutor, RepairWorker, RepairWorkerConfig, RepairWorkerRunResult,
-    RetrievalLogRecord, SqliteRepository, StatusCount as CoreStatusCount, StorageError,
-    StubEmbeddingProvider, VectorIndex,
+    apply_sqlite_migrations, ConnectomeHealthSnapshot, EmbeddingProvider, ForgetError,
+    ForgetPipeline, ForgetRequest as CoreForgetRequest, ForgetResult as CoreForgetResult,
+    InMemoryVectorIndex, IndexEntry, IndexError, IngestError, IngestPipeline,
+    IngestRequest as CoreIngestRequest, IngestResult as CoreIngestResult, MaintenanceJob,
+    RebuildChunkRecord, RebuildError, RebuildRequest as CoreRebuildRequest, RebuildScope,
+    RecallError, RecallPipeline, RecallRequest as CoreRecallRequest,
+    RecallResult as CoreRecallResult, RepairTask, RepairTaskExecutor, RepairWorker,
+    RepairWorkerConfig, RepairWorkerRunResult, RetrievalLogRecord, SqliteRepository,
+    StatusCount as CoreStatusCount, StorageError, StubEmbeddingProvider, VectorIndex,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -256,6 +256,7 @@ pub struct MetricsSnapshot {
     pub rebuild_job_statuses: Vec<StatusCountSnapshot>,
     pub repair_oldest_task_age_seconds: Option<f64>,
     pub rebuild_oldest_active_job_age_seconds: Option<f64>,
+    pub connectome_health: ConnectomeHealthSnapshot,
     pub connectome_edge_count: usize,
     pub connectome_density: f64,
     pub recall_telemetry: RecallTelemetrySnapshot,
@@ -665,6 +666,10 @@ impl AppState {
             .repository
             .load_oldest_active_maintenance_job_age_seconds("rebuild", DEFAULT_NAMESPACE)
             .map_err(AppStateError::Storage)?;
+        let connectome_health = services
+            .repository
+            .load_connectome_health(DEFAULT_NAMESPACE)
+            .map_err(AppStateError::Storage)?;
         let recall_telemetry = build_recall_telemetry_snapshot(&services.repository)
             .map_err(AppStateError::Storage)?;
         let possible_connectome_edges = stats
@@ -674,7 +679,7 @@ impl AppState {
         let connectome_density = if possible_connectome_edges == 0 {
             0.0
         } else {
-            stats.connectome_edge_count as f64 / possible_connectome_edges as f64
+            connectome_health.actual_edge_count as f64 / possible_connectome_edges as f64
         };
         let vector_index = self
             .vector_index
@@ -701,7 +706,8 @@ impl AppState {
             rebuild_job_statuses,
             repair_oldest_task_age_seconds,
             rebuild_oldest_active_job_age_seconds,
-            connectome_edge_count: stats.connectome_edge_count,
+            connectome_health: connectome_health.clone(),
+            connectome_edge_count: connectome_health.actual_edge_count,
             connectome_density,
             recall_telemetry,
         })
@@ -1803,16 +1809,16 @@ fn ensure_startup_connectome_repair(repository: &mut SqliteRepository) -> Result
         return Ok(());
     }
 
-    let requires_repair = repository
-        .connectome_requires_repair(DEFAULT_NAMESPACE)
+    let connectome_health = repository
+        .load_connectome_health(DEFAULT_NAMESPACE)
         .map_err(|error| format!("failed to inspect connectome consistency: {error}"))?;
-    if !requires_repair {
+    if !connectome_health.requires_repair() {
         return Ok(());
     }
 
     let payload_json = json!({
         "deleted_chunk_ids": [],
-        "reason": "startup_connectome_bootstrap",
+        "reason": "startup_connectome_drift",
     })
     .to_string();
     let task_id = repository
@@ -1828,7 +1834,11 @@ fn ensure_startup_connectome_repair(repository: &mut SqliteRepository) -> Result
         event = "server.bootstrap.connectome_repair_enqueued",
         namespace = DEFAULT_NAMESPACE,
         task_id = task_id,
-        "startup detected missing connectome edges and enqueued rebuild repair"
+        missing_edge_count = connectome_health.missing_edge_count,
+        stale_edge_count = connectome_health.stale_edge_count,
+        cooccur_mismatch_count = connectome_health.cooccur_mismatch_count,
+        weight_mismatch_count = connectome_health.weight_mismatch_count,
+        "startup detected connectome drift and enqueued rebuild repair"
     );
 
     Ok(())

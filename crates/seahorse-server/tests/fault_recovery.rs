@@ -405,7 +405,7 @@ fn startup_enqueues_connectome_repair_when_edges_are_missing() {
     assert_eq!(pending_task.status, "pending");
     assert_eq!(
         pending_task.payload_json.as_deref(),
-        Some("{\"deleted_chunk_ids\":[],\"reason\":\"startup_connectome_bootstrap\"}")
+        Some("{\"deleted_chunk_ids\":[],\"reason\":\"startup_connectome_drift\"}")
     );
     let missing_neighbors = repository
         .list_connectome_neighbors("default", "project", 10)
@@ -432,6 +432,74 @@ fn startup_enqueues_connectome_repair_when_edges_are_missing() {
             .any(|edge| edge.target_tag == "rust"),
         "startup repair should restore missing connectome edge"
     );
+
+    cleanup_db_path(&db_path);
+}
+
+#[test]
+fn startup_enqueues_connectome_repair_when_counts_drift() {
+    let db_path = unique_db_path("connectome-startup-drift");
+    let state = build_state(
+        &db_path,
+        3,
+        AppStateTestOptions::default().with_spawn_repair_worker(false),
+    );
+
+    let mut first_request = ingest_request("connectome-1.txt", "project rust first");
+    first_request.tags = vec!["project".to_owned(), "rust".to_owned()];
+    state
+        .ingest(first_request)
+        .expect("seed first connectome file");
+
+    let mut second_request = ingest_request("connectome-2.txt", "project rust second");
+    second_request.tags = vec!["project".to_owned(), "rust".to_owned()];
+    state
+        .ingest(second_request)
+        .expect("seed second connectome file");
+    drop(state);
+
+    let connection = Connection::open(&db_path).expect("open sqlite db for connectome drift");
+    connection
+        .execute(
+            "UPDATE connectome
+             SET cooccur_count = 1,
+                 weight = 1.0
+             WHERE namespace = 'default'",
+            [],
+        )
+        .expect("mutate connectome drift");
+    drop(connection);
+
+    let recovered_state = build_state(
+        &db_path,
+        3,
+        AppStateTestOptions::default().with_spawn_repair_worker(false),
+    );
+
+    let repository = open_repository(&db_path);
+    let pending_task = repository
+        .find_active_repair_task("default", "connectome_rebuild", "namespace")
+        .expect("find startup drift repair task")
+        .expect("startup drift repair task should exist");
+    assert_eq!(pending_task.status, "pending");
+    drop(repository);
+
+    let worker_result = recovered_state
+        .run_repair_worker_once_for_tests()
+        .expect("repair worker should rebuild drifted connectome");
+    assert_eq!(worker_result.scanned, 1);
+    assert_eq!(worker_result.succeeded, 1);
+
+    let repository = open_repository(&db_path);
+    let rebuilt_neighbors = repository
+        .list_connectome_neighbors("default", "project", 10)
+        .expect("load rebuilt drift neighbors");
+    let rust_edge = rebuilt_neighbors
+        .iter()
+        .find(|edge| edge.target_tag == "rust")
+        .expect("rebuilt rust edge should exist");
+    assert_eq!(rust_edge.cooccur_count, 2);
+    assert_eq!(rust_edge.weight, 2.0);
 
     cleanup_db_path(&db_path);
 }

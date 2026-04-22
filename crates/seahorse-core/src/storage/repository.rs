@@ -4,10 +4,10 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::models::{
-    CachedEmbedding, ChunkTagInsert, ChunkWrite, ConnectomeEdgeRecord, FileWrite, IngestWriteBatch,
-    MaintenanceJob, PersistedChunk, PersistedDeletion, PersistedFile, PersistedIngest,
-    PersistedReplacement, RebuildChunkRecord, RecallChunkRecord, RepairTask, RetrievalLogRecord,
-    RetrievalLogWrite, StorageStatsSnapshot, TagWrite,
+    CachedEmbedding, ChunkTagInsert, ChunkWrite, ConnectomeEdgeRecord, ConnectomeHealthSnapshot,
+    FileWrite, IngestWriteBatch, MaintenanceJob, PersistedChunk, PersistedDeletion, PersistedFile,
+    PersistedIngest, PersistedReplacement, RebuildChunkRecord, RecallChunkRecord, RepairTask,
+    RetrievalLogRecord, RetrievalLogWrite, StorageStatsSnapshot, TagWrite,
 };
 use super::schema::{validate_schema_meta, SchemaExpectation, SchemaMetaSnapshot};
 use super::{StorageError, StorageResult};
@@ -358,40 +358,128 @@ impl SqliteRepository {
         Ok(edges)
     }
 
-    pub fn connectome_requires_repair(&self, namespace: &str) -> StorageResult<bool> {
-        let connectome_edge_count: i64 = self.connection.query_row(
-            "SELECT COUNT(*)
+    pub fn load_connectome_health(
+        &self,
+        namespace: &str,
+    ) -> StorageResult<ConnectomeHealthSnapshot> {
+        const ACTIVE_CONNECTOME_PAIRS_CTE: &str = "
+            WITH active_pairs AS (
+                SELECT
+                    CASE WHEN ct1.tag_id < ct2.tag_id THEN ct1.tag_id ELSE ct2.tag_id END AS tag_i,
+                    CASE WHEN ct1.tag_id < ct2.tag_id THEN ct2.tag_id ELSE ct1.tag_id END AS tag_j,
+                    COUNT(*) AS expected_count
+                FROM chunks c
+                JOIN files f ON f.id = c.file_id
+                JOIN chunk_tags ct1 ON ct1.chunk_id = c.id
+                JOIN chunk_tags ct2 ON ct2.chunk_id = c.id AND ct1.tag_id < ct2.tag_id
+                JOIN tags t1 ON t1.id = ct1.tag_id
+                JOIN tags t2 ON t2.id = ct2.tag_id
+                WHERE c.namespace = ?1
+                  AND f.namespace = ?1
+                  AND t1.namespace = ?1
+                  AND t2.namespace = ?1
+                  AND c.is_deleted = 0
+                  AND c.index_status != 'deleted'
+                  AND f.ingest_status != 'deleted'
+                GROUP BY tag_i, tag_j
+            ),
+            actual_pairs AS (
+                SELECT tag_i, tag_j, cooccur_count, weight
+                FROM connectome
+                WHERE namespace = ?1
+            )";
+
+        let expected_edge_count: i64 = self.connection.query_row(
+            &format!(
+                "{ACTIVE_CONNECTOME_PAIRS_CTE}
+                 SELECT COUNT(*) FROM active_pairs"
+            ),
+            [namespace],
+            |row| row.get(0),
+        )?;
+        let actual_edge_count: i64 = self.connection.query_row(
+            "SELECT COUNT(*) FROM connectome WHERE namespace = ?1",
+            [namespace],
+            |row| row.get(0),
+        )?;
+        let missing_edge_count: i64 = self.connection.query_row(
+            &format!(
+                "{ACTIVE_CONNECTOME_PAIRS_CTE}
+                 SELECT COUNT(*)
+                 FROM active_pairs e
+                 LEFT JOIN actual_pairs a
+                   ON a.tag_i = e.tag_i AND a.tag_j = e.tag_j
+                 WHERE a.tag_i IS NULL"
+            ),
+            [namespace],
+            |row| row.get(0),
+        )?;
+        let stale_edge_count: i64 = self.connection.query_row(
+            &format!(
+                "{ACTIVE_CONNECTOME_PAIRS_CTE}
+                 SELECT COUNT(*)
+                 FROM actual_pairs a
+                 LEFT JOIN active_pairs e
+                   ON e.tag_i = a.tag_i AND e.tag_j = a.tag_j
+                 WHERE e.tag_i IS NULL"
+            ),
+            [namespace],
+            |row| row.get(0),
+        )?;
+        let cooccur_mismatch_count: i64 = self.connection.query_row(
+            &format!(
+                "{ACTIVE_CONNECTOME_PAIRS_CTE}
+                 SELECT COUNT(*)
+                 FROM active_pairs e
+                 JOIN actual_pairs a
+                   ON a.tag_i = e.tag_i AND a.tag_j = e.tag_j
+                 WHERE a.cooccur_count != e.expected_count"
+            ),
+            [namespace],
+            |row| row.get(0),
+        )?;
+        let weight_mismatch_count: i64 = self.connection.query_row(
+            &format!(
+                "{ACTIVE_CONNECTOME_PAIRS_CTE}
+                 SELECT COUNT(*)
+                 FROM active_pairs e
+                 JOIN actual_pairs a
+                   ON a.tag_i = e.tag_i AND a.tag_j = e.tag_j
+                 WHERE ABS(a.weight - CAST(e.expected_count AS REAL)) > 0.0001"
+            ),
+            [namespace],
+            |row| row.get(0),
+        )?;
+        let expected_cooccur_total: i64 = self.connection.query_row(
+            &format!(
+                "{ACTIVE_CONNECTOME_PAIRS_CTE}
+                 SELECT COALESCE(SUM(expected_count), 0) FROM active_pairs"
+            ),
+            [namespace],
+            |row| row.get(0),
+        )?;
+        let actual_cooccur_total: i64 = self.connection.query_row(
+            "SELECT COALESCE(SUM(cooccur_count), 0)
              FROM connectome
              WHERE namespace = ?1",
             [namespace],
             |row| row.get(0),
         )?;
-        if connectome_edge_count > 0 {
-            return Ok(false);
-        }
 
-        let multi_tag_chunk_count: i64 = self.connection.query_row(
-            "SELECT COUNT(*)
-             FROM (
-                SELECT ct.chunk_id
-                FROM chunk_tags ct
-                JOIN chunks c ON c.id = ct.chunk_id
-                JOIN files f ON f.id = c.file_id
-                JOIN tags t ON t.id = ct.tag_id
-                WHERE c.namespace = ?1
-                  AND f.namespace = ?1
-                  AND t.namespace = ?1
-                  AND c.is_deleted = 0
-                  AND c.index_status != 'deleted'
-                  AND f.ingest_status != 'deleted'
-                GROUP BY ct.chunk_id
-                HAVING COUNT(DISTINCT ct.tag_id) > 1
-             ) active_multi_tag_chunks",
-            [namespace],
-            |row| row.get(0),
-        )?;
+        Ok(ConnectomeHealthSnapshot {
+            expected_edge_count: expected_edge_count.max(0) as usize,
+            actual_edge_count: actual_edge_count.max(0) as usize,
+            missing_edge_count: missing_edge_count.max(0) as usize,
+            stale_edge_count: stale_edge_count.max(0) as usize,
+            cooccur_mismatch_count: cooccur_mismatch_count.max(0) as usize,
+            weight_mismatch_count: weight_mismatch_count.max(0) as usize,
+            expected_cooccur_total: expected_cooccur_total.max(0) as usize,
+            actual_cooccur_total: actual_cooccur_total.max(0) as usize,
+        })
+    }
 
-        Ok(multi_tag_chunk_count > 0)
+    pub fn connectome_requires_repair(&self, namespace: &str) -> StorageResult<bool> {
+        Ok(self.load_connectome_health(namespace)?.requires_repair())
     }
 
     pub fn list_chunk_records_by_any_tags(
@@ -2590,18 +2678,72 @@ mod tests {
                 ],
             })
             .expect("write connectome repair batch");
-        assert!(!repository
-            .connectome_requires_repair("default")
-            .expect("connectome should be healthy"));
+        let healthy = repository
+            .load_connectome_health("default")
+            .expect("load healthy connectome snapshot");
+        assert_eq!(healthy.expected_edge_count, 1);
+        assert_eq!(healthy.actual_edge_count, 1);
+        assert!(!healthy.requires_repair());
 
         repository
             .connection
             .execute("DELETE FROM connectome WHERE namespace = 'default'", [])
             .expect("delete connectome rows");
 
-        assert!(repository
-            .connectome_requires_repair("default")
-            .expect("connectome repair detection should succeed"));
+        let degraded = repository
+            .load_connectome_health("default")
+            .expect("load degraded connectome snapshot");
+        assert_eq!(degraded.expected_edge_count, 1);
+        assert_eq!(degraded.actual_edge_count, 0);
+        assert_eq!(degraded.missing_edge_count, 1);
+        assert!(degraded.requires_repair());
+    }
+
+    #[test]
+    fn detects_connectome_cooccur_drift_as_repair_needed() {
+        let mut repository = repository_with_schema();
+        repository
+            .write_ingest_batch(&IngestWriteBatch {
+                file: FileWrite::new("connectome-drift.txt", "hash-connectome-drift"),
+                chunks: vec![
+                    ChunkWrite::new(0, "project rust first", "chunk-drift-1", "test-model", 4),
+                    ChunkWrite::new(1, "project rust second", "chunk-drift-2", "test-model", 4),
+                ],
+                tags: vec![
+                    TagWrite::new("Project", "project"),
+                    TagWrite::new("Rust", "rust"),
+                ],
+                chunk_tags: vec![
+                    ChunkTagInsert::new(0, "project"),
+                    ChunkTagInsert::new(0, "rust"),
+                    ChunkTagInsert::new(1, "project"),
+                    ChunkTagInsert::new(1, "rust"),
+                ],
+            })
+            .expect("write connectome drift batch");
+
+        repository
+            .connection
+            .execute(
+                "UPDATE connectome
+                 SET cooccur_count = 1,
+                     weight = 1.0
+                 WHERE namespace = 'default'",
+                [],
+            )
+            .expect("mutate connectome cooccur count");
+
+        let snapshot = repository
+            .load_connectome_health("default")
+            .expect("load drifted connectome snapshot");
+
+        assert_eq!(snapshot.expected_edge_count, 1);
+        assert_eq!(snapshot.actual_edge_count, 1);
+        assert_eq!(snapshot.expected_cooccur_total, 2);
+        assert_eq!(snapshot.actual_cooccur_total, 1);
+        assert_eq!(snapshot.cooccur_mismatch_count, 1);
+        assert_eq!(snapshot.weight_mismatch_count, 1);
+        assert!(snapshot.requires_repair());
     }
 
     #[test]
