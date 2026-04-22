@@ -14,7 +14,7 @@ use seahorse_core::{
     RebuildRequest as CoreRebuildRequest, RebuildScope, RecallError, RecallPipeline,
     RecallRequest as CoreRecallRequest, RecallResult as CoreRecallResult, RepairTask,
     RepairTaskExecutor, RepairWorker, RepairWorkerConfig, RepairWorkerRunResult, SqliteRepository,
-    StorageError, StubEmbeddingProvider, VectorIndex,
+    StatusCount as CoreStatusCount, StorageError, StubEmbeddingProvider, VectorIndex,
 };
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -232,6 +232,20 @@ pub struct StatsSnapshot {
     pub deleted_chunk_count: usize,
     pub repair_queue_size: usize,
     pub index_status: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StatusCountSnapshot {
+    pub status: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct MetricsSnapshot {
+    pub stats: StatsSnapshot,
+    pub health: HealthSnapshot,
+    pub repair_queue_statuses: Vec<StatusCountSnapshot>,
+    pub rebuild_job_statuses: Vec<StatusCountSnapshot>,
 }
 
 #[derive(Debug)]
@@ -587,6 +601,58 @@ impl AppState {
             deleted_chunk_count: stats.deleted_chunk_count,
             repair_queue_size: stats.repair_queue_size,
             index_status: stats.index_status,
+        })
+    }
+
+    pub fn metrics_snapshot(&self) -> Result<MetricsSnapshot, AppStateError> {
+        let services = self
+            .services
+            .lock()
+            .map_err(|_| AppStateError::Unavailable {
+                message: "application state lock poisoned",
+            })?;
+        let index_state = current_index_state(&services.repository)?;
+        let stats = services
+            .repository
+            .load_stats(DEFAULT_NAMESPACE)
+            .map_err(AppStateError::Storage)?;
+        let repair_queue_statuses = services
+            .repository
+            .load_repair_queue_status_counts(DEFAULT_NAMESPACE)
+            .map_err(AppStateError::Storage)?
+            .into_iter()
+            .map(map_status_count)
+            .collect();
+        let rebuild_job_statuses = services
+            .repository
+            .load_maintenance_job_status_counts("rebuild", DEFAULT_NAMESPACE)
+            .map_err(AppStateError::Storage)?
+            .into_iter()
+            .map(map_status_count)
+            .collect();
+        let vector_index = self
+            .vector_index
+            .lock()
+            .map_err(|_| AppStateError::Unavailable {
+                message: "vector index lock poisoned",
+            })?;
+
+        Ok(MetricsSnapshot {
+            stats: StatsSnapshot {
+                chunk_count: stats.chunk_count,
+                tag_count: stats.tag_count,
+                deleted_chunk_count: stats.deleted_chunk_count,
+                repair_queue_size: stats.repair_queue_size,
+                index_status: stats.index_status,
+            },
+            health: HealthSnapshot {
+                status: health_status_from_index_state(&index_state).to_owned(),
+                db: services.db_label.clone(),
+                index: format!("memory-{}d", vector_index.dimension()),
+                embedding_provider: self.embedding_provider.model_id().to_owned(),
+            },
+            repair_queue_statuses,
+            rebuild_job_statuses,
         })
     }
 }
@@ -1544,6 +1610,13 @@ fn health_status_from_index_state(index_state: &str) -> &'static str {
         "rebuilding" | "degraded" => "degraded",
         "unavailable" => "failed",
         _ => "degraded",
+    }
+}
+
+fn map_status_count(value: CoreStatusCount) -> StatusCountSnapshot {
+    StatusCountSnapshot {
+        status: value.status,
+        count: value.count,
     }
 }
 

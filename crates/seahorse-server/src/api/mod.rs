@@ -174,6 +174,12 @@ pub struct HealthResponseData {
 }
 
 #[derive(Debug, Serialize)]
+pub struct LiveResponseData {
+    pub status: String,
+    pub version: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct StatsResponseData {
     pub chunk_count: usize,
     pub tag_count: usize,

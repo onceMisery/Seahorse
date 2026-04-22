@@ -20,6 +20,8 @@ pub fn build_app_with_observability(
         .route("/forget", post(handlers::forget::post_forget))
         .route("/admin/rebuild", post(handlers::rebuild::post_rebuild))
         .route("/admin/jobs/:job_id", get(handlers::jobs::get_job))
+        .route("/live", get(handlers::live::get_live))
+        .route("/ready", get(handlers::ready::get_ready))
         .route("/stats", get(handlers::stats::get_stats))
         .route("/health", get(handlers::health::get_health));
 
@@ -64,9 +66,11 @@ mod tests {
     use tower::util::ServiceExt;
 
     use super::{build_app, build_app_with_observability};
-    use crate::{config::ObservabilityConfig, state::AppState};
+    use crate::{
+        config::{ObservabilityConfig, ServerConfig},
+        state::{AppState, AppStateTestOptions, RuntimeIndexFaultConfig},
+    };
 
-    static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(1);
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(1);
     const JOB_POLL_ATTEMPTS: usize = 500;
     const JOB_POLL_SLEEP_MS: u64 = 20;
@@ -557,6 +561,94 @@ mod tests {
         cleanup_db_path(&db_path);
     }
 
+    #[tokio::test]
+    async fn ready_endpoint_returns_service_unavailable_when_index_state_is_unavailable() {
+        let (state, db_path) = test_state("ready-unavailable");
+        set_index_state(&db_path, "unavailable");
+        let app = build_app(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .expect("build ready request"),
+            )
+            .await
+            .expect("execute ready request");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = read_json_body(response).await;
+        assert_eq!(body["success"], Value::Bool(false));
+        assert_eq!(
+            body["error"]["code"],
+            Value::String("INDEX_UNAVAILABLE".to_owned())
+        );
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[tokio::test]
+    async fn live_endpoint_returns_process_liveness_contract() {
+        let (state, db_path) = test_state("live-ok");
+        let app = build_app(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/live")
+                    .body(Body::empty())
+                    .expect("build live request"),
+            )
+            .await
+            .expect("execute live request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json_body(response).await;
+        assert_eq!(body["success"], Value::Bool(true));
+        assert_eq!(body["data"]["status"], Value::String("ok".to_owned()));
+        assert!(body["data"]["version"].is_string());
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_exposes_repair_and_rebuild_status_breakdowns() {
+        let (state, db_path) = test_state_with_options(
+            "metrics-status-breakdown",
+            AppStateTestOptions::default()
+                .with_spawn_repair_worker(false)
+                .with_runtime_index_faults(RuntimeIndexFaultConfig::default().fail_insert_always()),
+        );
+        state
+            .ingest(CoreIngestRequest::new(
+                "metrics status breakdown alpha beta gamma".to_owned(),
+            ))
+            .expect("seed failed index ingest");
+        enqueue_rebuild_job(&db_path, "all", false);
+        let app = build_app(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("build metrics request"),
+            )
+            .await
+            .expect("execute metrics request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_text_body(response).await;
+        assert!(body.contains("seahorse_repair_queue_tasks{status=\"pending\"} 1"));
+        assert!(body.contains("seahorse_rebuild_jobs{status=\"queued\"} 1"));
+
+        cleanup_db_path(&db_path);
+    }
+
     fn test_state(name: &str) -> (AppState, PathBuf) {
         let db_path = unique_db_path(name);
         let state = AppState::new_with_db_path(
@@ -569,14 +661,14 @@ mod tests {
         (state, db_path)
     }
 
-    fn build_test_state(name: &str) -> (AppState, PathBuf) {
-        let db_path = unique_test_db_path(name);
-        let state = AppState::new_with_db_path(
-            db_path
-                .to_str()
-                .expect("temp db path must be valid unicode"),
-        )
-        .expect("create app state");
+    fn test_state_with_options(name: &str, options: AppStateTestOptions) -> (AppState, PathBuf) {
+        let db_path = unique_db_path(name);
+        let mut config = ServerConfig::default();
+        config.storage.db_path = db_path
+            .to_str()
+            .expect("temp db path must be valid unicode")
+            .to_owned();
+        let state = AppState::new_with_test_options(&config, options).expect("create app state");
 
         (state, db_path)
     }
@@ -625,6 +717,16 @@ mod tests {
             .expect("collect response body")
             .to_bytes();
         serde_json::from_slice(&bytes).expect("parse response body as json")
+    }
+
+    async fn read_text_body(response: axum::response::Response) -> String {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect response body")
+            .to_bytes();
+        String::from_utf8(bytes.to_vec()).expect("parse response body as text")
     }
 
     async fn post_rebuild_request(
@@ -686,17 +788,16 @@ mod tests {
         std::env::temp_dir().join(format!("seahorse-{name}-{millis}-{counter}.db"))
     }
 
-    fn unique_test_db_path(name: &str) -> PathBuf {
-        let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let millis = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time before unix epoch")
-            .as_millis();
-        std::env::temp_dir().join(format!("seahorse-{name}-{millis}-{counter}.db"))
-    }
-
     fn cleanup_db_path(path: &PathBuf) {
         let _ = std::fs::remove_file(path);
+    }
+
+    fn set_index_state(db_path: &PathBuf, value: &str) {
+        let connection = Connection::open(db_path).expect("open sqlite db for health mutation");
+        let mut repository = SqliteRepository::new(connection).expect("create repository");
+        repository
+            .set_schema_meta_value("index_state", value)
+            .expect("set index_state");
     }
 
     fn heavy_rebuild_content(prefix: &str, index: usize) -> String {

@@ -103,6 +103,19 @@ async fn json_endpoints_match_formal_response_envelope_contract() {
     assert!(health_body["data"]["embedding_provider"].is_string());
     assert!(health_body["data"]["version"].is_string());
 
+    let ready_body = json_request(&app, Method::GET, "/ready", None).await;
+    assert_success_envelope(&ready_body);
+    assert_string_enum(
+        &ready_body["data"]["status"],
+        HEALTH_STATUSES,
+        "data.status",
+    );
+
+    let live_body = json_request(&app, Method::GET, "/live", None).await;
+    assert_success_envelope(&live_body);
+    assert_eq!(live_body["data"]["status"], Value::String("ok".to_owned()));
+    assert!(live_body["data"]["version"].is_string());
+
     let forget_body = json_request(
         &app,
         Method::POST,
@@ -249,6 +262,10 @@ async fn metrics_endpoint_matches_formal_text_contract() {
 
     let health_status = raw_request_status(&app, Method::GET, "/health", None).await;
     assert_eq!(health_status, StatusCode::OK);
+    let ready_status = raw_request_status(&app, Method::GET, "/ready", None).await;
+    assert_eq!(ready_status, StatusCode::OK);
+    let live_status = raw_request_status(&app, Method::GET, "/live", None).await;
+    assert_eq!(live_status, StatusCode::OK);
 
     let response = raw_request(&app, Method::GET, "/metrics", None).await;
     let status = response.status();
@@ -265,6 +282,8 @@ async fn metrics_endpoint_matches_formal_text_contract() {
     assert!(body.contains("seahorse_http_requests_total{scope=\"total\"}"));
     assert!(body.contains("seahorse_chunk_count "));
     assert!(body.contains("seahorse_health_status{status=\"ok\"} 1"));
+    assert!(body.contains("seahorse_repair_queue_tasks{status=\"pending\"}"));
+    assert!(body.contains("seahorse_rebuild_jobs{status=\"queued\"}"));
 }
 
 async fn json_request(app: &Router, method: Method, uri: &str, body: Option<Value>) -> Value {

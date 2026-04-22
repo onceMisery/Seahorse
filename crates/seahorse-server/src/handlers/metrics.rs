@@ -3,11 +3,13 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 
 use crate::api::observability;
-use crate::state::{AppState, AppStateError, HealthSnapshot, StatsSnapshot};
+use crate::state::{AppState, AppStateError, MetricsSnapshot, StatusCountSnapshot};
 
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4";
 const INDEX_STATES: &[&str] = &["ready", "rebuilding", "degraded", "unavailable"];
 const HEALTH_STATUSES: &[&str] = &["ok", "degraded", "failed"];
+const REPAIR_QUEUE_STATUSES: &[&str] = &["pending", "running", "failed", "deadletter", "succeeded"];
+const REBUILD_JOB_STATUSES: &[&str] = &["queued", "running", "succeeded", "failed", "cancelled"];
 
 pub async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
     match render_metrics(&state) {
@@ -26,8 +28,7 @@ pub async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
 
 fn render_metrics(state: &AppState) -> Result<String, AppStateError> {
     let request_metrics = observability::request_metrics_snapshot();
-    let stats = state.stats_snapshot()?;
-    let health = state.health_snapshot()?;
+    let runtime = state.metrics_snapshot()?;
     let mut lines = Vec::new();
 
     append_metric_help(
@@ -106,23 +107,26 @@ fn render_metrics(state: &AppState) -> Result<String, AppStateError> {
         ));
     }
 
-    append_runtime_metrics(&mut lines, &stats, &health);
+    append_runtime_metrics(&mut lines, &runtime);
 
     lines.push(String::new());
     Ok(lines.join("\n"))
 }
 
-fn append_runtime_metrics(lines: &mut Vec<String>, stats: &StatsSnapshot, health: &HealthSnapshot) {
+fn append_runtime_metrics(lines: &mut Vec<String>, runtime: &MetricsSnapshot) {
     append_metric_help(
         lines,
         "seahorse_chunk_count",
         "Active chunk count.",
         "gauge",
     );
-    lines.push(format!("seahorse_chunk_count {}", stats.chunk_count));
+    lines.push(format!(
+        "seahorse_chunk_count {}",
+        runtime.stats.chunk_count
+    ));
 
     append_metric_help(lines, "seahorse_tag_count", "Tag count.", "gauge");
-    lines.push(format!("seahorse_tag_count {}", stats.tag_count));
+    lines.push(format!("seahorse_tag_count {}", runtime.stats.tag_count));
 
     append_metric_help(
         lines,
@@ -132,7 +136,7 @@ fn append_runtime_metrics(lines: &mut Vec<String>, stats: &StatsSnapshot, health
     );
     lines.push(format!(
         "seahorse_deleted_chunk_count {}",
-        stats.deleted_chunk_count
+        runtime.stats.deleted_chunk_count
     ));
 
     append_metric_help(
@@ -143,8 +147,24 @@ fn append_runtime_metrics(lines: &mut Vec<String>, stats: &StatsSnapshot, health
     );
     lines.push(format!(
         "seahorse_repair_queue_backlog{{namespace=\"default\"}} {}",
-        stats.repair_queue_size
+        runtime.stats.repair_queue_size
     ));
+
+    append_status_count_metric(
+        lines,
+        "seahorse_repair_queue_tasks",
+        "Repair queue task count by status.",
+        REPAIR_QUEUE_STATUSES,
+        &runtime.repair_queue_statuses,
+    );
+
+    append_status_count_metric(
+        lines,
+        "seahorse_rebuild_jobs",
+        "Rebuild maintenance job count by status.",
+        REBUILD_JOB_STATUSES,
+        &runtime.rebuild_job_statuses,
+    );
 
     append_metric_help(
         lines,
@@ -154,7 +174,7 @@ fn append_runtime_metrics(lines: &mut Vec<String>, stats: &StatsSnapshot, health
     );
     let mut index_state_known = false;
     for state in INDEX_STATES {
-        let value = if stats.index_status == *state {
+        let value = if runtime.stats.index_status == *state {
             index_state_known = true;
             1
         } else {
@@ -174,7 +194,7 @@ fn append_runtime_metrics(lines: &mut Vec<String>, stats: &StatsSnapshot, health
     );
     let mut health_status_known = false;
     for status in HEALTH_STATUSES {
-        let value = if health.status == *status {
+        let value = if runtime.health.status == *status {
             health_status_known = true;
             1
         } else {
@@ -186,6 +206,41 @@ fn append_runtime_metrics(lines: &mut Vec<String>, stats: &StatsSnapshot, health
     }
     if !health_status_known {
         lines.push("seahorse_health_status{status=\"unknown\"} 1".to_owned());
+    }
+}
+
+fn append_status_count_metric(
+    lines: &mut Vec<String>,
+    name: &str,
+    help: &str,
+    known_statuses: &[&str],
+    values: &[StatusCountSnapshot],
+) {
+    append_metric_help(lines, name, help, "gauge");
+    let mut seen_unknown = false;
+    for status in known_statuses {
+        let value = values
+            .iter()
+            .find(|entry| entry.status == *status)
+            .map(|entry| entry.count)
+            .unwrap_or(0);
+        lines.push(format!("{name}{{status=\"{status}\"}} {value}"));
+    }
+
+    for value in values {
+        if known_statuses.contains(&value.status.as_str()) {
+            continue;
+        }
+        seen_unknown = true;
+        lines.push(format!(
+            "{name}{{status=\"{}\"}} {}",
+            escape_label_value(&value.status),
+            value.count
+        ));
+    }
+
+    if !seen_unknown && values.is_empty() {
+        lines.push(format!("{name}{{status=\"unknown\"}} 0"));
     }
 }
 

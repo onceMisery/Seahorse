@@ -67,7 +67,9 @@
 ## 7. 当前代码已实现（含已关闭的 release blocker）
 
 - HTTP 主链路接口已实现：`POST /ingest`、`POST /recall`、`POST /forget`、`POST /admin/rebuild`、`GET /admin/jobs/{job_id}`、`GET /stats`、`GET /health`
+- 平台探针接口已实现：`GET /ready`（readiness）、`GET /live`（liveness）
 - `/metrics` 已作为正式运维接口实现；仅当 `enable_metrics=true` 时挂载，默认配置开启，默认路径为 `/metrics`，也可由 `observability.metrics_path` 覆盖
+- `/metrics` 已包含 HTTP 请求、repair queue 状态分布、rebuild job 状态分布、index_state、health_status 等核心指标
 - `POST /forget` 当前正式契约固定为 `mode=soft`，`hard` 不属于当前 MVP 发布契约
 - SQLite 备份、回滚、rebuild、health / stats / metrics 的人工巡检路径已在现有文档中定义
 
@@ -86,7 +88,7 @@
 
 当前仍未关闭的 release blocker：
 
-- 结构化请求日志完整接入
+- 结构化请求日志已在代码侧完成；待关闭项调整为日志采集/落库/检索链路验证
 - 告警规则在监控平台正式落地（当前仅给出 MVP 阈值建议）
 - release 环境上的 `10k chunk` hard gate 最终过线确认
 

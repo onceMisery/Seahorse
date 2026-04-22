@@ -41,8 +41,11 @@ components:
           properties:
             chunk_mode:
               type: string
+              enum: [fixed]
+              description: 当前构建仅支持 fixed；省略等同 fixed，其它值返回 400 INVALID_INPUT
             auto_tag:
               type: boolean
+              description: 仅用于 /ingest；默认 false。开启后使用内置规则型启发式提取 tags，并与显式 tags 去重合并
             dedup_mode:
               type: string
               enum: [reject, upsert, allow]
@@ -63,6 +66,7 @@ components:
           default: 10
         timeout_ms:
           type: integer
+          description: 仅用于 /recall；表示单请求超时预算，命中返回 504 TIMEOUT
         chunk_ids:
           type: array
           items:
@@ -96,7 +100,7 @@ components:
       properties:
         code:
           type: string
-          enum: [INVALID_INPUT, EMBEDDING_FAILED, STORAGE_ERROR, INDEX_UNAVAILABLE, REBUILD_FAILED, TIMEOUT, PARTIAL_RESULT]
+          enum: [INVALID_INPUT, EMBEDDING_FAILED, STORAGE_ERROR, INDEX_UNAVAILABLE, REBUILD_FAILED, TIMEOUT]
         message:
           type: string
         retryable:
@@ -272,7 +276,7 @@ paths:
                             description: 被软删除的 chunk 数量
                           index_cleanup_status:
                             type: string
-                            enum: [pending, running, completed]
+                            enum: [pending, completed]
   /admin/rebuild:
     post:
       summary: 提交 rebuild 作业
@@ -352,7 +356,10 @@ paths:
                             enum: [ready, rebuilding, degraded, unavailable]
   /health:
     get:
-      summary: 健康检查
+      summary: 健康巡检
+      description: |
+        用于人工巡检的详细健康快照接口。
+        即使内部状态不可用，也保持 200 响应并在 data.status 中返回 failed。
       responses:
         '200':
           description: health
@@ -376,6 +383,63 @@ paths:
                             type: string
                           version:
                             type: string
+  /ready:
+    get:
+      summary: Readiness 探针
+      description: |
+        面向平台探针的 readiness 接口。
+        当服务可继续提供 MVP 能力时返回 200；当内部健康状态为 failed 或健康快照不可获取时返回 503。
+      responses:
+        '200':
+          description: ready
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResponseEnvelope'
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: [ok, degraded]
+                          db:
+                            type: string
+                          index:
+                            type: string
+                          embedding_provider:
+                            type: string
+                          version:
+                            type: string
+        '503':
+          description: not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResponseEnvelope'
+  /live:
+    get:
+      summary: Liveness 探针
+      description: |
+        仅表示进程存活，不检查数据库、索引或后台队列状态。
+      responses:
+        '200':
+          description: live
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ResponseEnvelope'
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          status:
+                            type: string
+                            enum: [ok]
+                          version:
+                            type: string
   /metrics:
     get:
       summary: 导出 Prometheus 指标
@@ -383,6 +447,7 @@ paths:
         正式运维契约默认暴露 GET /metrics。
         该端点仅在 observability.enable_metrics=true 时挂载；默认配置为开启。
         若运行时通过 observability.metrics_path 覆盖路径，则相同格式响应会暴露在配置路径上。
+        指标包含 HTTP 请求、repair queue 状态分布、rebuild job 状态分布、index_state 与 health_status。
       responses:
         '200':
           description: Prometheus exposition format
