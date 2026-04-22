@@ -112,9 +112,9 @@ Commit: `c0e8b1a` `feat(recall): log retrieval metadata for design-all phase1`
 - Modify: `crates/seahorse-core/src/lib.rs`
 - Test: `crates/seahorse-core/src/lib.rs`
 
-- [ ] **Step 1: 写失败测试，证明 facade 可构建并导出**
-- [ ] **Step 2: 运行单测确认失败**
-- [ ] **Step 3: 实现最小架构骨架**
+- [x] **Step 1: 写失败测试，证明 facade 可构建并导出**
+- [x] **Step 2: 运行单测确认失败**
+- [x] **Step 3: 实现最小架构骨架**
 
 实现要求：
 - 每个模块提供最小 config/state/type 占位
@@ -123,8 +123,10 @@ Commit: `c0e8b1a` `feat(recall): log retrieval metadata for design-all phase1`
 - `SeahorseEngine` 组合五个脑区模块
 - 不改现有 server API 合约
 
-- [ ] **Step 4: 运行 lib 测试与 workspace 编译**
-- [ ] **Step 5: 提交**
+- [x] **Step 4: 运行 lib 测试与 workspace 编译**
+- [x] **Step 5: 提交**
+
+Commit: `1fdab0d` `feat(core): add design-all phase1 architecture skeleton`
 
 ### Task 5: Cortex 最小 HNSW facade 与 mmap archive 基线
 
@@ -136,22 +138,24 @@ Commit: `c0e8b1a` `feat(recall): log retrieval metadata for design-all phase1`
 - Test: `crates/seahorse-core/src/cortex/hnsw.rs`
 - Test: `crates/seahorse-core/src/cortex/archive.rs`
 
-- [ ] **Step 1: 写失败测试，覆盖最小插入/查询与快照恢复**
+- [x] **Step 1: 写失败测试，覆盖最小插入/查询与快照恢复**
 
 新增测试：
 - `searches_inserted_vectors_through_cortex_hnsw`
 - `round_trips_cortex_archive_snapshot`
 
-- [ ] **Step 2: 运行单测确认失败**
-- [ ] **Step 3: 实现最小可运行 Cortex**
+- [x] **Step 2: 运行单测确认失败**
+- [x] **Step 3: 实现最小可运行 Cortex**
 
 实现要求：
 - `Cortex` 提供最小插入/查询 facade
 - 第一版允许使用现有 `InMemoryVectorIndex` 作为 bootstrap 后端
 - `archive` 提供最小快照序列化/恢复接口，为后续真正 mmap 落地预留稳定 API
 
-- [ ] **Step 4: 运行 Cortex 测试**
-- [ ] **Step 5: 提交**
+- [x] **Step 4: 运行 Cortex 测试**
+- [x] **Step 5: 提交**
+
+Commit: `5f95eb5` `feat(cortex): add design-all phase1 cortex foundation`
 
 ### Task 6: mmap/recovery 降级路径验证
 
@@ -160,43 +164,45 @@ Commit: `c0e8b1a` `feat(recall): log retrieval metadata for design-all phase1`
 - Modify: `crates/seahorse-core/src/cortex/mod.rs`
 - Test: `crates/seahorse-core/src/cortex/archive.rs`
 
-- [ ] **Step 1: 写失败测试，覆盖损坏快照降级**
+- [x] **Step 1: 写失败测试，覆盖损坏快照降级**
 
 新增测试：
 - `rejects_corrupted_cortex_archive_snapshot`
 
-- [ ] **Step 2: 运行单测确认失败**
-- [ ] **Step 3: 实现最小降级语义**
+- [x] **Step 2: 运行单测确认失败**
+- [x] **Step 3: 实现最小降级语义**
 
 实现要求：
 - archive 读取时校验头信息与维度
 - 损坏或不匹配时返回明确错误
 - 为后续 repair/recovery 留出错误边界
 
-- [ ] **Step 4: 运行相关测试**
-- [ ] **Step 5: 提交**
+- [x] **Step 4: 运行相关测试**
+- [x] **Step 5: 提交**
+
+Commit: `a13eea8` `feat(cortex): validate archive recovery boundaries`
 
 ### Task 7: 最终验证
 
 **Files:**
 - Verify only
 
-- [ ] **Step 1: 运行格式化**
+- [x] **Step 1: 运行格式化**
 
 Run: `cargo fmt --all`
 Expected: exit 0
 
-- [ ] **Step 2: 运行核心测试**
+- [x] **Step 2: 运行核心测试**
 
 Run: `cargo test -p seahorse-core --lib -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 3: 运行服务端测试**
+- [x] **Step 3: 运行服务端测试**
 
 Run: `cargo test -p seahorse-server -- --nocapture`
 Expected: PASS
 
-- [ ] **Step 4: 运行文档校验**
+- [x] **Step 4: 运行文档校验**
 
 Run: `powershell -File scripts/check-mvp-docs.ps1`
 Expected: PASS
