@@ -1,11 +1,13 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::time::Instant;
 
 use crate::embedding::{EmbeddingError, EmbeddingProvider};
 use crate::index::{IndexError, SearchRequest, VectorIndex};
 use crate::pipeline::hashing::stable_content_hash;
+use crate::pipeline::tagging::resolve_tags;
 use crate::storage::{RecallChunkRecord, RetrievalLogWrite, SqliteRepository, StorageError};
+use crate::synapse::{Synapse, SynapseConfig};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecallFilters {
@@ -13,11 +15,27 @@ pub struct RecallFilters {
     pub tags: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecallMode {
+    Basic,
+    TagMemo,
+}
+
+impl RecallMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Basic => "basic",
+            Self::TagMemo => "tagmemo",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecallRequest {
     pub namespace: String,
     pub query: String,
     pub top_k: usize,
+    pub mode: RecallMode,
     pub filters: RecallFilters,
     pub timeout_ms: Option<u64>,
 }
@@ -28,6 +46,7 @@ impl RecallRequest {
             namespace: "default".to_owned(),
             query: query.into(),
             top_k: 10,
+            mode: RecallMode::Basic,
             filters: RecallFilters::default(),
             timeout_ms: None,
         }
@@ -168,46 +187,33 @@ where
 
         let mut seen = HashSet::new();
         let normalized_filter_tags = normalize_filter_tags(&request.filters.tags);
-        let mut results = Vec::new();
+        let mut results = collect_vector_results(
+            self.repository,
+            &request,
+            &normalized_filter_tags,
+            hits,
+            &mut seen,
+            started_at,
+        )?;
 
-        for hit in hits {
-            ensure_not_timed_out(started_at, request.timeout_ms)?;
-            let Some(record) = self.repository.get_chunk_record(hit.chunk_id)? else {
-                continue;
-            };
-
-            if hit.namespace != request.namespace || record.namespace != request.namespace {
-                continue;
-            }
-
-            if !matches_filters(&record, &request.filters, &normalized_filter_tags) {
-                continue;
-            }
-
-            if !seen.insert(hit.chunk_id) {
-                continue;
-            }
-
-            results.push(RecallResultItem {
-                chunk_id: record.chunk_id,
-                chunk_text: record.chunk_text,
-                source_file: record.source_file,
-                tags: record.tags,
-                score: hit.score,
-                source_type: "Vector".to_owned(),
-                metadata_json: record.metadata_json,
-            });
-
-            if results.len() >= request.top_k {
-                break;
-            }
+        if request.mode == RecallMode::TagMemo && results.len() < request.top_k {
+            let remaining = request.top_k - results.len();
+            let associated = collect_tagmemo_results(
+                self.repository,
+                &request,
+                &normalized_filter_tags,
+                &mut seen,
+                remaining,
+                started_at,
+            )?;
+            results.extend(associated);
         }
 
         let recall_duration = started_at.elapsed();
         let latency_ms = recall_duration.as_millis().min(u128::from(u64::MAX)) as u64;
         let total_time_us = recall_duration.as_micros().min(i64::MAX as u128) as i64;
         let query_hash = stable_content_hash(query_text);
-        let retrieval_log = RetrievalLogWrite::new(query_text, query_hash, "basic")
+        let retrieval_log = RetrievalLogWrite::new(query_text, query_hash, request.mode.as_str())
             .with_result_count(results.len() as i64)
             .with_total_time_us(total_time_us)
             .with_params_snapshot(build_retrieval_log_params_snapshot(&request));
@@ -262,12 +268,142 @@ fn build_retrieval_log_params_snapshot(request: &RecallRequest) -> String {
         .unwrap_or_else(|| "null".to_owned());
 
     format!(
-        "{{\"top_k\":{},\"filter_file_id\":{},\"filter_tag_count\":{},\"timeout_ms\":{}}}",
+        "{{\"mode\":\"{}\",\"top_k\":{},\"filter_file_id\":{},\"filter_tag_count\":{},\"timeout_ms\":{}}}",
+        request.mode.as_str(),
         request.top_k,
         file_id,
         request.filters.tags.len(),
         timeout_ms,
     )
+}
+
+fn collect_vector_results(
+    repository: &mut SqliteRepository,
+    request: &RecallRequest,
+    normalized_filter_tags: &[String],
+    hits: Vec<crate::index::SearchHit>,
+    seen: &mut HashSet<i64>,
+    started_at: Instant,
+) -> Result<Vec<RecallResultItem>, RecallError> {
+    let mut results = Vec::new();
+
+    for hit in hits {
+        ensure_not_timed_out(started_at, request.timeout_ms)?;
+        let Some(record) = repository.get_chunk_record(hit.chunk_id)? else {
+            continue;
+        };
+
+        if hit.namespace != request.namespace || record.namespace != request.namespace {
+            continue;
+        }
+
+        if !matches_filters(&record, &request.filters, normalized_filter_tags) {
+            continue;
+        }
+
+        if !seen.insert(hit.chunk_id) {
+            continue;
+        }
+
+        results.push(RecallResultItem {
+            chunk_id: record.chunk_id,
+            chunk_text: record.chunk_text,
+            source_file: record.source_file,
+            tags: record.tags,
+            score: hit.score,
+            source_type: "Vector".to_owned(),
+            metadata_json: record.metadata_json,
+        });
+
+        if results.len() >= request.top_k {
+            break;
+        }
+    }
+
+    Ok(results)
+}
+
+fn collect_tagmemo_results(
+    repository: &mut SqliteRepository,
+    request: &RecallRequest,
+    normalized_filter_tags: &[String],
+    seen: &mut HashSet<i64>,
+    limit: usize,
+    started_at: Instant,
+) -> Result<Vec<RecallResultItem>, RecallError> {
+    ensure_not_timed_out(started_at, request.timeout_ms)?;
+    let mut seed_tags = resolve_tags(&[], request.query.trim(), None, true)
+        .into_iter()
+        .map(|tag| tag.normalized_name)
+        .collect::<Vec<_>>();
+    ensure_not_timed_out(started_at, request.timeout_ms)?;
+    seed_tags.extend(normalized_filter_tags.iter().cloned());
+    seed_tags.sort();
+    seed_tags.dedup();
+
+    if seed_tags.is_empty() || limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    let mut synapse = Synapse::new(SynapseConfig {
+        max_signals: limit.saturating_mul(4).max(seed_tags.len()),
+        neighbor_limit: limit.saturating_mul(2).max(4),
+    });
+    for seed_tag in &seed_tags {
+        ensure_not_timed_out(started_at, request.timeout_ms)?;
+        synapse.activate_connectome_neighbors(repository, &request.namespace, seed_tag, 1.0)?;
+    }
+
+    let mut signal_strengths = HashMap::<String, f32>::new();
+    for signal in synapse.signals() {
+        signal_strengths
+            .entry(signal.tag.clone())
+            .and_modify(|value| *value = value.max(signal.potential))
+            .or_insert(signal.potential);
+    }
+
+    let candidate_tags = signal_strengths.keys().cloned().collect::<Vec<_>>();
+    ensure_not_timed_out(started_at, request.timeout_ms)?;
+    let records = repository.list_chunk_records_by_any_tags(&request.namespace, &candidate_tags)?;
+
+    let mut results = Vec::new();
+    for record in records {
+        ensure_not_timed_out(started_at, request.timeout_ms)?;
+        if !matches_filters(&record, &request.filters, normalized_filter_tags) {
+            continue;
+        }
+
+        if !seen.insert(record.chunk_id) {
+            continue;
+        }
+
+        let score = record
+            .tags
+            .iter()
+            .filter_map(|tag| signal_strengths.get(tag))
+            .copied()
+            .sum::<f32>();
+
+        results.push(RecallResultItem {
+            chunk_id: record.chunk_id,
+            chunk_text: record.chunk_text,
+            source_file: record.source_file,
+            tags: record.tags,
+            score,
+            source_type: "SpikeAssociation".to_owned(),
+            metadata_json: record.metadata_json,
+        });
+    }
+
+    results.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.chunk_id.cmp(&right.chunk_id))
+    });
+    results.truncate(limit);
+
+    Ok(results)
 }
 
 fn ensure_not_timed_out(started_at: Instant, timeout_ms: Option<u64>) -> Result<(), RecallError> {
@@ -323,8 +459,8 @@ fn matches_filters(
 mod tests {
     use rusqlite::Connection;
 
-    use super::{RecallFilters, RecallPipeline, RecallRequest};
-    use crate::embedding::StubEmbeddingProvider;
+    use super::{RecallFilters, RecallMode, RecallPipeline, RecallRequest};
+    use crate::embedding::{EmbeddingProvider, EmbeddingResult, StubEmbeddingProvider};
     use crate::index::{IndexEntry, IndexResult, SearchHit, SearchRequest, VectorIndex};
     use crate::pipeline::{IngestPipeline, IngestRequest};
     use crate::storage::{apply_sqlite_migrations, SqliteRepository};
@@ -545,6 +681,176 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].query_text, "missing recall log");
         assert_eq!(logs[0].result_count, 0);
+    }
+
+    #[test]
+    fn recalls_associated_chunks_in_tagmemo_mode_when_vector_hits_are_empty() {
+        let mut repository = repository_with_schema();
+        let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
+        let mut ingest_index = StaticHitIndex::new(4, Vec::new());
+
+        let mut connectome_request = IngestRequest::new("project rust anchor");
+        connectome_request.filename = "connectome.txt".to_owned();
+        connectome_request.tags = vec!["project".to_owned(), "rust".to_owned()];
+        IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+            .ingest(connectome_request)
+            .expect("seed connectome");
+
+        let mut associated_request = IngestRequest::new("rust compiler deep dive");
+        associated_request.filename = "rust.txt".to_owned();
+        associated_request.tags = vec!["rust".to_owned()];
+        let associated_ingest = IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+            .ingest(associated_request)
+            .expect("seed associated chunk");
+
+        let recall_index = StaticHitIndex::new(4, Vec::new());
+        let mut request = RecallRequest::new("project");
+        request.mode = RecallMode::TagMemo;
+
+        let result = RecallPipeline::new(&mut repository, &provider, &recall_index)
+            .recall(request)
+            .expect("tagmemo recall");
+
+        assert!(
+            result
+                .results
+                .iter()
+                .any(|item| item.chunk_id == associated_ingest.chunk_ids[0]
+                    && item.source_type == "SpikeAssociation"),
+            "tagmemo should recover the associated rust chunk through connectome"
+        );
+    }
+
+    #[test]
+    fn times_out_during_tagmemo_association_expansion() {
+        let mut repository = repository_with_schema();
+        let provider = FixedEmbeddingProvider::new(4);
+        let mut ingest_index = StaticHitIndex::new(4, Vec::new());
+
+        for occurrence in 0..8 {
+            let mut connectome_request = IngestRequest::new(format!("alpha bridge {occurrence}"));
+            connectome_request.filename = format!("connectome-{occurrence}.txt");
+            connectome_request.tags = vec!["alpha".to_owned(), "bridge".to_owned()];
+            IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+                .ingest(connectome_request)
+                .expect("seed connectome");
+        }
+
+        let mut candidate_request = IngestRequest::new("alpha candidate");
+        candidate_request.filename = "candidate.txt".to_owned();
+        candidate_request.tags = vec!["alpha".to_owned(), "candidate".to_owned()];
+        IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+            .ingest(candidate_request)
+            .expect("seed candidate");
+
+        let recall_index = StaticHitIndex::new(4, Vec::new());
+        let mut request = RecallRequest::new("alpha ".repeat(200_000));
+        request.mode = RecallMode::TagMemo;
+        request.timeout_ms = Some(1);
+
+        let error = RecallPipeline::new(&mut repository, &provider, &recall_index)
+            .recall(request)
+            .expect_err("tagmemo expansion should respect timeout budget");
+
+        assert!(
+            matches!(error, super::RecallError::Timeout { .. }),
+            "expected timeout during tagmemo association, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn ranks_tagmemo_candidates_by_final_signal_score_before_truncation() {
+        let mut repository = repository_with_schema();
+        let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
+        let mut ingest_index = StaticHitIndex::new(4, Vec::new());
+
+        for occurrence in 0..3 {
+            let mut request = IngestRequest::new(format!("alpha zeta bridge {occurrence}"));
+            request.filename = format!("alpha-zeta-{occurrence}.txt");
+            request.tags = vec!["alpha".to_owned(), "zeta".to_owned()];
+            IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+                .ingest(request)
+                .expect("seed alpha-zeta connectome");
+        }
+
+        for (filename, related_tag) in [("alpha-gamma.txt", "gamma"), ("alpha-delta.txt", "delta")]
+        {
+            let mut request = IngestRequest::new(format!("alpha {related_tag} bridge"));
+            request.filename = filename.to_owned();
+            request.tags = vec!["alpha".to_owned(), related_tag.to_owned()];
+            IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+                .ingest(request)
+                .expect("seed weaker connectome edge");
+        }
+
+        let mut strong_request = IngestRequest::new("alpha strongest candidate");
+        strong_request.filename = "strong.txt".to_owned();
+        strong_request.tags = vec!["alpha".to_owned(), "candidate".to_owned()];
+        let strong = IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+            .ingest(strong_request)
+            .expect("seed strong candidate");
+
+        let mut weak_request = IngestRequest::new("gamma delta candidate");
+        weak_request.filename = "weak.txt".to_owned();
+        weak_request.tags = vec![
+            "gamma".to_owned(),
+            "delta".to_owned(),
+            "candidate".to_owned(),
+        ];
+        IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+            .ingest(weak_request)
+            .expect("seed weak candidate");
+
+        let recall_index = StaticHitIndex::new(4, Vec::new());
+        let mut request = RecallRequest::new("alpha");
+        request.mode = RecallMode::TagMemo;
+        request.top_k = 1;
+        request.filters = RecallFilters {
+            file_id: None,
+            tags: vec!["candidate".to_owned()],
+        };
+
+        let result = RecallPipeline::new(&mut repository, &provider, &recall_index)
+            .recall(request)
+            .expect("tagmemo recall");
+
+        assert_eq!(result.results.len(), 1);
+        assert_eq!(result.results[0].chunk_id, strong.chunk_ids[0]);
+        assert_eq!(result.results[0].source_type, "SpikeAssociation");
+        assert!(result.results[0].score > 0.9);
+    }
+
+    #[derive(Debug)]
+    struct FixedEmbeddingProvider {
+        dimension: usize,
+    }
+
+    impl FixedEmbeddingProvider {
+        fn new(dimension: usize) -> Self {
+            Self { dimension }
+        }
+    }
+
+    impl EmbeddingProvider for FixedEmbeddingProvider {
+        fn embed(&self, _text: &str) -> EmbeddingResult<Vec<f32>> {
+            Ok(vec![0.0; self.dimension])
+        }
+
+        fn embed_batch(&self, texts: &[String]) -> EmbeddingResult<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.0; self.dimension]).collect())
+        }
+
+        fn model_id(&self) -> &str {
+            "fixed-test"
+        }
+
+        fn dimension(&self) -> usize {
+            self.dimension
+        }
+
+        fn max_batch_size(&self) -> usize {
+            32
+        }
     }
 
     #[derive(Debug)]

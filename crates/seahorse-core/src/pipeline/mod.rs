@@ -13,6 +13,6 @@ pub use ingest::{
 };
 pub use rebuild::{RebuildError, RebuildPipeline, RebuildRequest, RebuildResult, RebuildScope};
 pub use recall::{
-    RecallError, RecallFilters, RecallPipeline, RecallRequest, RecallResponseMetadata,
+    RecallError, RecallFilters, RecallMode, RecallPipeline, RecallRequest, RecallResponseMetadata,
     RecallResult, RecallResultItem,
 };

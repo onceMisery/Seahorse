@@ -197,7 +197,7 @@ async fn json_error_responses_match_formal_response_envelope_contract() {
             "mode": "semantic"
         })),
         StatusCode::BAD_REQUEST,
-        "mode must be basic; got semantic",
+        "mode must be one of basic, tagmemo; got semantic",
     )
     .await;
 

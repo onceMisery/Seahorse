@@ -404,7 +404,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recall_endpoint_rejects_non_basic_mode_at_api_boundary() {
+    async fn recall_endpoint_rejects_unknown_mode_at_api_boundary() {
         let (state, db_path) = test_state("recall-non-basic-mode");
         let app = build_app(state);
         let response = app
@@ -435,7 +435,7 @@ mod tests {
         );
         assert_eq!(
             body["error"]["message"],
-            Value::String("mode must be basic; got semantic".to_owned())
+            Value::String("mode must be one of basic, tagmemo; got semantic".to_owned())
         );
 
         cleanup_db_path(&db_path);
@@ -456,6 +456,51 @@ mod tests {
                             "namespace": "default",
                             "query": "alpha",
                             "mode": "basic"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("build recall request"),
+            )
+            .await
+            .expect("execute recall request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json_body(response).await;
+        assert_eq!(body["success"], Value::Bool(true));
+        assert_eq!(body["error"], Value::Null);
+        assert!(body["data"]["results"].is_array());
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[tokio::test]
+    async fn recall_endpoint_accepts_tagmemo_mode() {
+        let (state, db_path) = test_state("recall-tagmemo-mode");
+
+        let mut connectome_request = CoreIngestRequest::new("project rust anchor".to_owned());
+        connectome_request.filename = "connectome.txt".to_owned();
+        connectome_request.tags = vec!["project".to_owned(), "rust".to_owned()];
+        state.ingest(connectome_request).expect("seed connectome");
+
+        let mut associated_request = CoreIngestRequest::new("rust compiler deep dive".to_owned());
+        associated_request.filename = "rust.txt".to_owned();
+        associated_request.tags = vec!["rust".to_owned()];
+        state
+            .ingest(associated_request)
+            .expect("seed associated chunk");
+
+        let app = build_app(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/recall")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "namespace": "default",
+                            "query": "project",
+                            "mode": "tagmemo"
                         })
                         .to_string(),
                     ))

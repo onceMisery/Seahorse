@@ -358,6 +358,58 @@ impl SqliteRepository {
         Ok(edges)
     }
 
+    pub fn list_chunk_records_by_any_tags(
+        &self,
+        namespace: &str,
+        tags: &[String],
+    ) -> StorageResult<Vec<RecallChunkRecord>> {
+        let unique_tags = tags
+            .iter()
+            .map(|tag| tag.trim().to_ascii_lowercase())
+            .filter(|tag| !tag.is_empty())
+            .collect::<BTreeSet<_>>();
+        if unique_tags.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut match_counts = BTreeMap::<i64, usize>::new();
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT c.id
+             FROM chunks c
+             JOIN files f ON f.id = c.file_id
+             JOIN chunk_tags ct ON ct.chunk_id = c.id
+             JOIN tags t ON t.id = ct.tag_id
+             WHERE c.namespace = ?1
+               AND f.namespace = ?1
+               AND t.namespace = ?1
+               AND t.normalized_name = ?2
+               AND c.is_deleted = 0
+               AND c.index_status != 'deleted'
+               AND f.ingest_status != 'deleted'",
+        )?;
+
+        for tag in unique_tags {
+            let rows = statement.query_map(params![namespace, tag], |row| row.get::<_, i64>(0))?;
+            for row in rows {
+                let chunk_id = row?;
+                *match_counts.entry(chunk_id).or_insert(0) += 1;
+            }
+        }
+
+        let mut ranked_chunk_ids = match_counts.into_iter().collect::<Vec<_>>();
+        ranked_chunk_ids
+            .sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+
+        let mut records = Vec::new();
+        for (chunk_id, _) in ranked_chunk_ids {
+            if let Some(record) = self.get_chunk_record(chunk_id)? {
+                records.push(record);
+            }
+        }
+
+        Ok(records)
+    }
+
     pub fn with_transaction<T, F>(&mut self, operation: F) -> StorageResult<T>
     where
         F: FnOnce(&Transaction<'_>) -> StorageResult<T>,

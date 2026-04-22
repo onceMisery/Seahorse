@@ -1,7 +1,7 @@
 use axum::extract::{rejection::JsonRejection, State};
 use axum::http::StatusCode;
 use axum::Json;
-use seahorse_core::{EmbeddingError, RecallError, RecallRequest as CoreRecallRequest};
+use seahorse_core::{EmbeddingError, RecallError, RecallMode, RecallRequest as CoreRecallRequest};
 use serde_json::{Map, Value};
 use tracing::{info, warn};
 
@@ -147,11 +147,11 @@ fn build_recall_request(request: RecallRequest) -> Result<CoreRecallRequest, Str
         return Err("top_k must be between 1 and 20".to_owned());
     }
 
-    if let Some(mode) = mode.as_deref() {
-        if mode != "basic" {
-            return Err(format!("mode must be basic; got {mode}"));
-        }
-    }
+    let recall_mode = match mode.as_deref().unwrap_or("basic") {
+        "basic" => RecallMode::Basic,
+        "tagmemo" => RecallMode::TagMemo,
+        other => return Err(format!("mode must be one of basic, tagmemo; got {other}")),
+    };
 
     let filters = filters.unwrap_or(crate::api::RecallFilters {
         file_id: None,
@@ -162,6 +162,7 @@ fn build_recall_request(request: RecallRequest) -> Result<CoreRecallRequest, Str
     let mut core_request = CoreRecallRequest::new(query);
     core_request.namespace = namespace;
     core_request.top_k = top_k as usize;
+    core_request.mode = recall_mode;
     core_request.timeout_ms = timeout_ms;
     core_request.filters.file_id = filters.file_id;
     core_request.filters.tags = filters.tags;
@@ -286,6 +287,7 @@ fn map_embedding_error(error: EmbeddingError) -> RecallResponse {
 mod tests {
     use super::build_recall_request;
     use crate::api::RecallRequest;
+    use seahorse_core::RecallMode;
 
     #[test]
     fn forwards_timeout_ms_into_core_request() {
@@ -300,5 +302,20 @@ mod tests {
         .expect("recall request should build");
 
         assert_eq!(request.timeout_ms, Some(25));
+    }
+
+    #[test]
+    fn accepts_tagmemo_mode() {
+        let request = build_recall_request(RecallRequest {
+            namespace: "default".to_owned(),
+            query: "alpha".to_owned(),
+            top_k: 5,
+            filters: None,
+            mode: Some("tagmemo".to_owned()),
+            timeout_ms: None,
+        })
+        .expect("tagmemo recall request should build");
+
+        assert_eq!(request.mode, RecallMode::TagMemo);
     }
 }

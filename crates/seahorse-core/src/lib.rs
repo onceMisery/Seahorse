@@ -35,8 +35,8 @@ pub use pipeline::preprocessor::normalize_text;
 pub use pipeline::{
     DedupMode, ForgetError, ForgetMode, ForgetPipeline, ForgetRequest, ForgetResult, IngestError,
     IngestOptions, IngestPipeline, IngestRequest, IngestResult, RebuildError, RebuildPipeline,
-    RebuildRequest, RebuildResult, RebuildScope, RecallError, RecallFilters, RecallPipeline,
-    RecallRequest, RecallResponseMetadata, RecallResult, RecallResultItem,
+    RebuildRequest, RebuildResult, RebuildScope, RecallError, RecallFilters, RecallMode,
+    RecallPipeline, RecallRequest, RecallResponseMetadata, RecallResult, RecallResultItem,
 };
 pub use storage::{
     apply_sqlite_migrations, read_schema_meta, validate_schema_meta, CachedEmbedding,
