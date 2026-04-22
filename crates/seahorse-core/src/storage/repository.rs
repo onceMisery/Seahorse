@@ -4,9 +4,10 @@ use std::path::Path;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::models::{
-    ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, MaintenanceJob, PersistedChunk,
-    PersistedDeletion, PersistedFile, PersistedIngest, PersistedReplacement, RebuildChunkRecord,
-    RecallChunkRecord, RepairTask, StorageStatsSnapshot, TagWrite,
+    CachedEmbedding, ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, MaintenanceJob,
+    PersistedChunk, PersistedDeletion, PersistedFile, PersistedIngest, PersistedReplacement,
+    RebuildChunkRecord, RecallChunkRecord, RepairTask, RetrievalLogRecord, RetrievalLogWrite,
+    StorageStatsSnapshot, TagWrite,
 };
 use super::schema::{validate_schema_meta, SchemaExpectation, SchemaMetaSnapshot};
 use super::{StorageError, StorageResult};
@@ -145,6 +146,159 @@ impl SqliteRepository {
             }
             None => Ok(None),
         }
+    }
+
+    pub fn get_cached_embedding(
+        &self,
+        namespace: &str,
+        content_hash: &str,
+        model_id: &str,
+    ) -> StorageResult<Option<CachedEmbedding>> {
+        self.connection
+            .query_row(
+                "SELECT
+                    id,
+                    namespace,
+                    content_hash,
+                    model_id,
+                    dimension,
+                    vector_blob,
+                    created_at
+                 FROM embedding_cache
+                 WHERE namespace = ?1
+                   AND content_hash = ?2
+                   AND model_id = ?3",
+                params![namespace, content_hash, model_id],
+                map_cached_embedding,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn put_cached_embedding(
+        &mut self,
+        namespace: &str,
+        content_hash: &str,
+        model_id: &str,
+        vector: &[f32],
+    ) -> StorageResult<CachedEmbedding> {
+        let dimension =
+            i64::try_from(vector.len()).map_err(|_| StorageError::InvalidBatchReference {
+                message: "embedding vector length exceeds i64".to_owned(),
+            })?;
+        let vector_blob = serialize_embedding(vector);
+
+        self.connection.execute(
+            "INSERT INTO embedding_cache (
+                namespace,
+                content_hash,
+                model_id,
+                dimension,
+                vector_blob
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(namespace, content_hash, model_id)
+            DO UPDATE SET
+                dimension = excluded.dimension,
+                vector_blob = excluded.vector_blob",
+            params![namespace, content_hash, model_id, dimension, vector_blob],
+        )?;
+
+        self.get_cached_embedding(namespace, content_hash, model_id)?
+            .ok_or(rusqlite::Error::QueryReturnedNoRows.into())
+    }
+
+    pub fn append_retrieval_log(
+        &mut self,
+        namespace: &str,
+        log: &RetrievalLogWrite,
+    ) -> StorageResult<RetrievalLogRecord> {
+        self.connection.execute(
+            "INSERT INTO retrieval_log (
+                namespace,
+                query_text,
+                query_hash,
+                mode,
+                worldview,
+                entropy,
+                result_count,
+                total_time_us,
+                spike_depth,
+                emergent_count,
+                params_snapshot
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                namespace,
+                log.query_text,
+                log.query_hash,
+                log.mode,
+                log.worldview,
+                log.entropy,
+                log.result_count,
+                log.total_time_us,
+                log.spike_depth,
+                log.emergent_count,
+                log.params_snapshot,
+            ],
+        )?;
+
+        let log_id = self.connection.last_insert_rowid();
+        self.connection
+            .query_row(
+                "SELECT
+                    id,
+                    namespace,
+                    query_text,
+                    query_hash,
+                    mode,
+                    worldview,
+                    entropy,
+                    result_count,
+                    total_time_us,
+                    spike_depth,
+                    emergent_count,
+                    params_snapshot,
+                    created_at
+                 FROM retrieval_log
+                 WHERE id = ?1",
+                [log_id],
+                map_retrieval_log_record,
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn list_retrieval_logs(
+        &self,
+        namespace: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<RetrievalLogRecord>> {
+        let limit = limit.max(1).min(i64::MAX as usize) as i64;
+        let mut statement = self.connection.prepare(
+            "SELECT
+                id,
+                namespace,
+                query_text,
+                query_hash,
+                mode,
+                worldview,
+                entropy,
+                result_count,
+                total_time_us,
+                spike_depth,
+                emergent_count,
+                params_snapshot,
+                created_at
+             FROM retrieval_log
+             WHERE namespace = ?1
+             ORDER BY id DESC
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![namespace, limit], map_retrieval_log_record)?;
+
+        let mut logs = Vec::new();
+        for row in rows {
+            logs.push(row?);
+        }
+        Ok(logs)
     }
 
     pub fn with_transaction<T, F>(&mut self, operation: F) -> StorageResult<T>
@@ -943,6 +1097,74 @@ fn map_repair_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<RepairTask> {
     })
 }
 
+fn map_cached_embedding(row: &rusqlite::Row<'_>) -> rusqlite::Result<CachedEmbedding> {
+    let vector_blob: Vec<u8> = row.get(5)?;
+    let vector = deserialize_embedding(&vector_blob).map_err(|message| {
+        rusqlite::Error::FromSqlConversionFailure(
+            5,
+            rusqlite::types::Type::Blob,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message,
+            )),
+        )
+    })?;
+
+    Ok(CachedEmbedding {
+        id: row.get(0)?,
+        namespace: row.get(1)?,
+        content_hash: row.get(2)?,
+        model_id: row.get(3)?,
+        dimension: row.get(4)?,
+        vector,
+        created_at: row.get(6)?,
+    })
+}
+
+fn map_retrieval_log_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RetrievalLogRecord> {
+    Ok(RetrievalLogRecord {
+        id: row.get(0)?,
+        namespace: row.get(1)?,
+        query_text: row.get(2)?,
+        query_hash: row.get(3)?,
+        mode: row.get(4)?,
+        worldview: row.get(5)?,
+        entropy: row.get(6)?,
+        result_count: row.get(7)?,
+        total_time_us: row.get(8)?,
+        spike_depth: row.get(9)?,
+        emergent_count: row.get(10)?,
+        params_snapshot: row.get(11)?,
+        created_at: row.get(12)?,
+    })
+}
+
+fn serialize_embedding(vector: &[f32]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(vector.len() * std::mem::size_of::<f32>());
+    for value in vector {
+        blob.extend_from_slice(&value.to_le_bytes());
+    }
+    blob
+}
+
+fn deserialize_embedding(blob: &[u8]) -> Result<Vec<f32>, String> {
+    if blob.len() % std::mem::size_of::<f32>() != 0 {
+        return Err(format!(
+            "embedding blob size {} is not divisible by {}",
+            blob.len(),
+            std::mem::size_of::<f32>()
+        ));
+    }
+
+    let mut vector = Vec::with_capacity(blob.len() / std::mem::size_of::<f32>());
+    for chunk in blob.chunks_exact(std::mem::size_of::<f32>()) {
+        let mut bytes = [0_u8; std::mem::size_of::<f32>()];
+        bytes.copy_from_slice(chunk);
+        vector.push(f32::from_le_bytes(bytes));
+    }
+    Ok(vector)
+}
+
 enum ClaimRepairTaskResult {
     Claimed(RepairTask),
     Empty,
@@ -1256,7 +1478,7 @@ mod tests {
 
     use super::SqliteRepository;
     use crate::storage::models::{
-        ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, TagWrite,
+        ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, RetrievalLogWrite, TagWrite,
     };
     use crate::storage::{
         apply_sqlite_migrations, SchemaExpectation, StorageError, LATEST_SCHEMA_VERSION,
@@ -1793,5 +2015,62 @@ mod tests {
             rebuild_age >= 180.0,
             "expected rebuild age >= 180s, got {rebuild_age}"
         );
+    }
+
+    #[test]
+    fn persists_and_reads_embedding_cache_entries() {
+        let mut repository = repository_with_schema();
+        let embedding = vec![0.125, -0.5, 0.875];
+
+        repository
+            .put_cached_embedding("default", "chunk-cache-hash", "test-model", &embedding)
+            .expect("cache embedding");
+
+        let cached = repository
+            .get_cached_embedding("default", "chunk-cache-hash", "test-model")
+            .expect("load cached embedding")
+            .expect("cached embedding should exist");
+
+        assert_eq!(cached.namespace, "default");
+        assert_eq!(cached.content_hash, "chunk-cache-hash");
+        assert_eq!(cached.model_id, "test-model");
+        assert_eq!(cached.dimension, 3);
+        assert_eq!(cached.vector, embedding);
+    }
+
+    #[test]
+    fn persists_retrieval_log_entries_in_time_order() {
+        let mut repository = repository_with_schema();
+
+        repository
+            .append_retrieval_log(
+                "default",
+                &RetrievalLogWrite::new("query alpha", "hash-alpha", "basic")
+                    .with_result_count(2)
+                    .with_total_time_us(1_200)
+                    .with_params_snapshot("{\"top_k\":5}"),
+            )
+            .expect("append first retrieval log");
+        repository
+            .append_retrieval_log(
+                "default",
+                &RetrievalLogWrite::new("query beta", "hash-beta", "basic")
+                    .with_result_count(0)
+                    .with_total_time_us(900)
+                    .with_params_snapshot("{\"top_k\":3}"),
+            )
+            .expect("append second retrieval log");
+
+        let logs = repository
+            .list_retrieval_logs("default", 10)
+            .expect("list retrieval logs");
+
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].query_hash, "hash-beta");
+        assert_eq!(logs[0].result_count, 0);
+        assert_eq!(logs[0].total_time_us, Some(900));
+        assert_eq!(logs[1].query_hash, "hash-alpha");
+        assert_eq!(logs[1].result_count, 2);
+        assert_eq!(logs[1].params_snapshot.as_deref(), Some("{\"top_k\":5}"));
     }
 }

@@ -193,6 +193,104 @@ pub struct RepairTask {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct CachedEmbedding {
+    pub id: i64,
+    pub namespace: String,
+    pub content_hash: String,
+    pub model_id: String,
+    pub dimension: i64,
+    pub vector: Vec<f32>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetrievalLogWrite {
+    pub query_text: String,
+    pub query_hash: String,
+    pub mode: String,
+    pub worldview: Option<String>,
+    pub entropy: Option<f64>,
+    pub result_count: i64,
+    pub total_time_us: Option<i64>,
+    pub spike_depth: Option<i64>,
+    pub emergent_count: Option<i64>,
+    pub params_snapshot: Option<String>,
+}
+
+impl RetrievalLogWrite {
+    pub fn new(
+        query_text: impl Into<String>,
+        query_hash: impl Into<String>,
+        mode: impl Into<String>,
+    ) -> Self {
+        Self {
+            query_text: query_text.into(),
+            query_hash: query_hash.into(),
+            mode: mode.into(),
+            worldview: None,
+            entropy: None,
+            result_count: 0,
+            total_time_us: None,
+            spike_depth: None,
+            emergent_count: None,
+            params_snapshot: None,
+        }
+    }
+
+    pub fn with_worldview(mut self, worldview: impl Into<String>) -> Self {
+        self.worldview = Some(worldview.into());
+        self
+    }
+
+    pub fn with_entropy(mut self, entropy: f64) -> Self {
+        self.entropy = Some(entropy);
+        self
+    }
+
+    pub fn with_result_count(mut self, result_count: i64) -> Self {
+        self.result_count = result_count;
+        self
+    }
+
+    pub fn with_total_time_us(mut self, total_time_us: i64) -> Self {
+        self.total_time_us = Some(total_time_us);
+        self
+    }
+
+    pub fn with_spike_depth(mut self, spike_depth: i64) -> Self {
+        self.spike_depth = Some(spike_depth);
+        self
+    }
+
+    pub fn with_emergent_count(mut self, emergent_count: i64) -> Self {
+        self.emergent_count = Some(emergent_count);
+        self
+    }
+
+    pub fn with_params_snapshot(mut self, params_snapshot: impl Into<String>) -> Self {
+        self.params_snapshot = Some(params_snapshot.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RetrievalLogRecord {
+    pub id: i64,
+    pub namespace: String,
+    pub query_text: String,
+    pub query_hash: String,
+    pub mode: String,
+    pub worldview: Option<String>,
+    pub entropy: Option<f64>,
+    pub result_count: i64,
+    pub total_time_us: Option<i64>,
+    pub spike_depth: Option<i64>,
+    pub emergent_count: Option<i64>,
+    pub params_snapshot: Option<String>,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageStatsSnapshot {
     pub chunk_count: usize,
