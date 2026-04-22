@@ -681,6 +681,37 @@ mod tests {
     }
 
     #[test]
+    fn writes_technical_thalamus_analysis_into_recall_metadata() {
+        let mut repository = repository_with_schema();
+        let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
+        let mut ingest_index = StaticHitIndex::new(4, Vec::new());
+
+        let ingest_result = IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+            .ingest(IngestRequest::new("rust vector recall architecture"))
+            .expect("ingest");
+        let recall_index = StaticHitIndex::new(
+            4,
+            vec![SearchHit {
+                chunk_id: ingest_result.chunk_ids[0],
+                namespace: "default".to_owned(),
+                score: 0.95,
+            }],
+        );
+
+        let result = RecallPipeline::new(&mut repository, &provider, &recall_index)
+            .recall(RecallRequest::new("rust vector index recall"))
+            .expect("recall");
+        let logs = repository
+            .list_retrieval_logs("default", 10)
+            .expect("list retrieval logs");
+
+        assert_eq!(result.metadata.worldview.as_deref(), Some("technical"));
+        assert!(result.metadata.entropy.is_some());
+        assert_eq!(logs[0].worldview.as_deref(), Some("technical"));
+        assert!(logs[0].entropy.is_some());
+    }
+
+    #[test]
     fn persists_retrieval_log_for_empty_result_recall() {
         let mut repository = repository_with_schema();
         let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
