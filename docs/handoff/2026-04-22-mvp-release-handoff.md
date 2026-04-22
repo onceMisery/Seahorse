@@ -47,6 +47,8 @@
   - `docs/mvp-release-checklist.md`
 - 运行手册：
   - `docs/runbooks/mvp-deploy-backup-rollback.md`
+  - `docs/runbooks/mvp-release-execution-checklist.md`
+  - `docs/runbooks/mvp-logging-validation-record-template.md`
 - 告警样例：
   - `docs/runbooks/mvp-alert-rules.example.yaml`
 - readiness 证据：
@@ -61,8 +63,8 @@
 ## 6. 建议的发布前最后步骤
 
 1. 以 release 配置启动服务
-2. 验证 `GET /live`、`GET /ready`、`GET /health`、`GET /metrics`
+2. 运行 `powershell -File scripts/run-mvp-release-validation.ps1`
 3. 导入 `docs/runbooks/mvp-alert-rules.example.yaml` 到监控平台
-4. 执行一次最小人工链路：ingest -> recall -> forget -> rebuild -> job query
+4. 按 `docs/runbooks/mvp-logging-validation-record-template.md` 补齐日志链路验证记录
 5. 在 release 机器执行 `cargo test -p seahorse-server perf_baseline_10k -- --ignored --nocapture`
 6. 归档最终命令输出、监控截图和告警验证记录

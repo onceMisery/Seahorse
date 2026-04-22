@@ -10,6 +10,7 @@
 6. `reports/2026-03-26-mvp-release-readiness.md`
 7. `handoff/2026-04-22-mvp-release-handoff.md`
 8. `runbooks/mvp-release-execution-checklist.md`
+9. `runbooks/mvp-logging-validation-record-template.md`
 
 ## 其他文档
 
@@ -27,6 +28,8 @@
   Prometheus 告警规则样例，覆盖 health failed、repair deadletter、repair backlog stall、rebuild stall、HTTP error rate。
 - `runbooks/mvp-release-execution-checklist.md`
   release 当天可直接照跑的执行清单，覆盖启动、探针、人工链路、告警验证、perf gate 与证据归档。
+- `runbooks/mvp-logging-validation-record-template.md`
+  日志采集、落库、检索链路验证模板，用于关闭结构化日志剩余的外部验证 blocker。
 - `reports/2026-03-26-mvp-release-readiness.md`
   当前 release readiness 证据汇总，包括测试命令、通过情况与性能基线结果。
 - `handoff/2026-04-22-mvp-release-handoff.md`

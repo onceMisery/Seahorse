@@ -39,6 +39,12 @@ cargo test -p seahorse-server -- --nocapture
 powershell -File scripts/check-mvp-docs.ps1
 ```
 
+如需将大部分检查自动化执行，可改用：
+
+```powershell
+powershell -File scripts/run-mvp-release-validation.ps1
+```
+
 ## 3. 启动与基础探针
 
 1. 启动服务：
@@ -167,7 +173,12 @@ cargo test -p seahorse-server perf_baseline_10k -- --ignored --nocapture
 - 最小业务链路请求与响应样本
 - rebuild job 最终状态记录
 - 告警规则导入与验证证据
+- 日志链路验证记录
 - `10k chunk` perf gate 输出
+
+日志链路验证模板：
+
+- `docs/runbooks/mvp-logging-validation-record-template.md`
 
 ## 8. 失败回退
 
