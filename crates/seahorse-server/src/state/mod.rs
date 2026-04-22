@@ -256,6 +256,8 @@ pub struct MetricsSnapshot {
     pub rebuild_job_statuses: Vec<StatusCountSnapshot>,
     pub repair_oldest_task_age_seconds: Option<f64>,
     pub rebuild_oldest_active_job_age_seconds: Option<f64>,
+    pub connectome_edge_count: usize,
+    pub connectome_density: f64,
     pub recall_telemetry: RecallTelemetrySnapshot,
 }
 
@@ -665,6 +667,15 @@ impl AppState {
             .map_err(AppStateError::Storage)?;
         let recall_telemetry = build_recall_telemetry_snapshot(&services.repository)
             .map_err(AppStateError::Storage)?;
+        let possible_connectome_edges = stats
+            .active_tag_count
+            .saturating_mul(stats.active_tag_count.saturating_sub(1))
+            / 2;
+        let connectome_density = if possible_connectome_edges == 0 {
+            0.0
+        } else {
+            stats.connectome_edge_count as f64 / possible_connectome_edges as f64
+        };
         let vector_index = self
             .vector_index
             .lock()
@@ -690,6 +701,8 @@ impl AppState {
             rebuild_job_statuses,
             repair_oldest_task_age_seconds,
             rebuild_oldest_active_job_age_seconds,
+            connectome_edge_count: stats.connectome_edge_count,
+            connectome_density,
             recall_telemetry,
         })
     }

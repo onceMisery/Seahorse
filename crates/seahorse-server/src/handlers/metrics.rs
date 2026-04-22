@@ -132,6 +132,28 @@ fn append_runtime_metrics(lines: &mut Vec<String>, runtime: &MetricsSnapshot) {
 
     append_metric_help(
         lines,
+        "seahorse_connectome_edge_count",
+        "Connectome edge count.",
+        "gauge",
+    );
+    lines.push(format!(
+        "seahorse_connectome_edge_count {}",
+        runtime.connectome_edge_count
+    ));
+
+    append_metric_help(
+        lines,
+        "seahorse_connectome_density",
+        "Connectome density across active tags.",
+        "gauge",
+    );
+    lines.push(format!(
+        "seahorse_connectome_density {}",
+        runtime.connectome_density
+    ));
+
+    append_metric_help(
+        lines,
         "seahorse_deleted_chunk_count",
         "Deleted chunk count.",
         "gauge",

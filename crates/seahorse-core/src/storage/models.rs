@@ -305,7 +305,9 @@ pub struct RetrievalLogRecord {
 pub struct StorageStatsSnapshot {
     pub chunk_count: usize,
     pub tag_count: usize,
+    pub active_tag_count: usize,
     pub deleted_chunk_count: usize,
+    pub connectome_edge_count: usize,
     pub repair_queue_size: usize,
     pub index_status: String,
 }

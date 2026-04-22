@@ -783,6 +783,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_endpoint_exposes_connectome_topology_gauges() {
+        let (state, db_path) = test_state("metrics-connectome-topology");
+
+        let mut connectome_request = CoreIngestRequest::new("project rust anchor".to_owned());
+        connectome_request.filename = "connectome.txt".to_owned();
+        connectome_request.tags = vec!["project".to_owned(), "rust".to_owned()];
+        state.ingest(connectome_request).expect("seed connectome");
+
+        let app = build_app(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("build metrics request"),
+            )
+            .await
+            .expect("execute metrics request");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_text_body(response).await;
+        assert!(body.contains("seahorse_connectome_edge_count 1"));
+        assert!(body.contains("seahorse_connectome_density 1"));
+
+        cleanup_db_path(&db_path);
+    }
+
+    #[tokio::test]
     async fn metrics_endpoint_exposes_repair_and_rebuild_age_gauges() {
         let (state, db_path) = test_state_with_options(
             "metrics-age-gauges",

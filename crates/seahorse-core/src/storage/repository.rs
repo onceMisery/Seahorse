@@ -1115,11 +1115,33 @@ impl SqliteRepository {
             [namespace],
             |row| row.get::<_, i64>(0),
         )?;
+        let active_tag_count = self.connection.query_row(
+            "SELECT COUNT(DISTINCT t.id)
+             FROM tags t
+             JOIN chunk_tags ct ON ct.tag_id = t.id
+             JOIN chunks c ON c.id = ct.chunk_id
+             JOIN files f ON f.id = c.file_id
+             WHERE t.namespace = ?1
+               AND c.namespace = ?1
+               AND f.namespace = ?1
+               AND c.is_deleted = 0
+               AND c.index_status != 'deleted'
+               AND f.ingest_status != 'deleted'",
+            [namespace],
+            |row| row.get::<_, i64>(0),
+        )?;
         let deleted_chunk_count = self.connection.query_row(
             "SELECT COUNT(*)
              FROM chunks
              WHERE namespace = ?1
                AND (is_deleted = 1 OR index_status = 'deleted')",
+            [namespace],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let connectome_edge_count = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM connectome
+             WHERE namespace = ?1",
             [namespace],
             |row| row.get::<_, i64>(0),
         )?;
@@ -1138,7 +1160,9 @@ impl SqliteRepository {
         Ok(StorageStatsSnapshot {
             chunk_count: chunk_count.max(0) as usize,
             tag_count: tag_count.max(0) as usize,
+            active_tag_count: active_tag_count.max(0) as usize,
             deleted_chunk_count: deleted_chunk_count.max(0) as usize,
+            connectome_edge_count: connectome_edge_count.max(0) as usize,
             repair_queue_size: repair_queue_size.max(0) as usize,
             index_status,
         })
@@ -2235,7 +2259,9 @@ mod tests {
 
         assert_eq!(stats.chunk_count, 1);
         assert_eq!(stats.tag_count, 1);
+        assert_eq!(stats.active_tag_count, 1);
         assert_eq!(stats.deleted_chunk_count, 1);
+        assert_eq!(stats.connectome_edge_count, 0);
         assert_eq!(stats.repair_queue_size, 1);
         assert_eq!(stats.index_status, "degraded");
     }
