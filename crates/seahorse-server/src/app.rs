@@ -905,9 +905,9 @@ mod tests {
             "seahorse_recall_recent_results_total{source=\"vector\"}",
             1.0,
         );
-        assert!(body.contains(
-            "seahorse_recall_recent_results_total{source=\"spike_association\"} 0"
-        ));
+        assert!(
+            body.contains("seahorse_recall_recent_results_total{source=\"spike_association\"} 0")
+        );
         assert_metric_value_at_least(&body, "seahorse_recall_recent_entropy_avg", 0.0);
         assert!(body.contains("seahorse_recall_recent_emergent_total 0"));
 

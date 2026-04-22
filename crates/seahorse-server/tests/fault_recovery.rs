@@ -369,6 +369,73 @@ fn repair_worker_rebuilds_connectome_after_forget() {
     cleanup_db_path(&db_path);
 }
 
+#[test]
+fn startup_enqueues_connectome_repair_when_edges_are_missing() {
+    let db_path = unique_db_path("connectome-startup-bootstrap");
+    let state = build_state(
+        &db_path,
+        3,
+        AppStateTestOptions::default().with_spawn_repair_worker(false),
+    );
+
+    let mut connectome_request = ingest_request("connectome.txt", "project rust anchor");
+    connectome_request.tags = vec!["project".to_owned(), "rust".to_owned()];
+    state
+        .ingest(connectome_request)
+        .expect("seed connectome file");
+    drop(state);
+
+    let connection = Connection::open(&db_path).expect("open sqlite db for connectome mutation");
+    connection
+        .execute("DELETE FROM connectome WHERE namespace = 'default'", [])
+        .expect("delete connectome rows");
+    drop(connection);
+
+    let recovered_state = build_state(
+        &db_path,
+        3,
+        AppStateTestOptions::default().with_spawn_repair_worker(false),
+    );
+
+    let repository = open_repository(&db_path);
+    let pending_task = repository
+        .find_active_repair_task("default", "connectome_rebuild", "namespace")
+        .expect("find startup connectome repair task")
+        .expect("startup connectome repair task should exist");
+    assert_eq!(pending_task.status, "pending");
+    assert_eq!(
+        pending_task.payload_json.as_deref(),
+        Some("{\"deleted_chunk_ids\":[],\"reason\":\"startup_connectome_bootstrap\"}")
+    );
+    let missing_neighbors = repository
+        .list_connectome_neighbors("default", "project", 10)
+        .expect("load missing connectome neighbors");
+    assert!(
+        missing_neighbors.is_empty(),
+        "connectome should remain empty until repair worker runs"
+    );
+    drop(repository);
+
+    let worker_result = recovered_state
+        .run_repair_worker_once_for_tests()
+        .expect("repair worker should rebuild startup connectome");
+    assert_eq!(worker_result.scanned, 1);
+    assert_eq!(worker_result.succeeded, 1);
+
+    let repository = open_repository(&db_path);
+    let rebuilt_neighbors = repository
+        .list_connectome_neighbors("default", "project", 10)
+        .expect("load rebuilt connectome neighbors");
+    assert!(
+        rebuilt_neighbors
+            .iter()
+            .any(|edge| edge.target_tag == "rust"),
+        "startup repair should restore missing connectome edge"
+    );
+
+    cleanup_db_path(&db_path);
+}
+
 fn build_state(db_path: &Path, max_retries: u32, options: AppStateTestOptions) -> AppState {
     let mut config = ServerConfig::default();
     config.storage.db_path = db_path.to_string_lossy().into_owned();

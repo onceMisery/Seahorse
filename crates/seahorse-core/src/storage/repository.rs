@@ -358,6 +358,42 @@ impl SqliteRepository {
         Ok(edges)
     }
 
+    pub fn connectome_requires_repair(&self, namespace: &str) -> StorageResult<bool> {
+        let connectome_edge_count: i64 = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM connectome
+             WHERE namespace = ?1",
+            [namespace],
+            |row| row.get(0),
+        )?;
+        if connectome_edge_count > 0 {
+            return Ok(false);
+        }
+
+        let multi_tag_chunk_count: i64 = self.connection.query_row(
+            "SELECT COUNT(*)
+             FROM (
+                SELECT ct.chunk_id
+                FROM chunk_tags ct
+                JOIN chunks c ON c.id = ct.chunk_id
+                JOIN files f ON f.id = c.file_id
+                JOIN tags t ON t.id = ct.tag_id
+                WHERE c.namespace = ?1
+                  AND f.namespace = ?1
+                  AND t.namespace = ?1
+                  AND c.is_deleted = 0
+                  AND c.index_status != 'deleted'
+                  AND f.ingest_status != 'deleted'
+                GROUP BY ct.chunk_id
+                HAVING COUNT(DISTINCT ct.tag_id) > 1
+             ) active_multi_tag_chunks",
+            [namespace],
+            |row| row.get(0),
+        )?;
+
+        Ok(multi_tag_chunk_count > 0)
+    }
+
     pub fn list_chunk_records_by_any_tags(
         &self,
         namespace: &str,
@@ -2503,6 +2539,43 @@ mod tests {
                 .any(|edge| edge.target_tag == "memory"),
             "active file edge should remain after connectome rebuild"
         );
+    }
+
+    #[test]
+    fn detects_when_connectome_requires_repair() {
+        let mut repository = repository_with_schema();
+        repository
+            .write_ingest_batch(&IngestWriteBatch {
+                file: FileWrite::new("connectome.txt", "hash-connectome-repair-needed"),
+                chunks: vec![ChunkWrite::new(
+                    0,
+                    "project rust repair seed",
+                    "chunk-hash-connectome-repair-needed",
+                    "test-model",
+                    4,
+                )],
+                tags: vec![
+                    TagWrite::new("Project", "project"),
+                    TagWrite::new("Rust", "rust"),
+                ],
+                chunk_tags: vec![
+                    ChunkTagInsert::new(0, "project"),
+                    ChunkTagInsert::new(0, "rust"),
+                ],
+            })
+            .expect("write connectome repair batch");
+        assert!(!repository
+            .connectome_requires_repair("default")
+            .expect("connectome should be healthy"));
+
+        repository
+            .connection
+            .execute("DELETE FROM connectome WHERE namespace = 'default'", [])
+            .expect("delete connectome rows");
+
+        assert!(repository
+            .connectome_requires_repair("default")
+            .expect("connectome repair detection should succeed"));
     }
 
     #[test]

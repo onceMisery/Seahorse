@@ -340,6 +340,7 @@ impl AppState {
                 REPAIR_RECOVERY_ERROR,
             )
             .map_err(|error| format!("failed to recover running repair tasks: {error}"))?;
+        ensure_startup_connectome_repair(&mut repository)?;
         let mut vector_index = RuntimeVectorIndex::new(embedding_provider.dimension());
         let bootstrap_entries = build_bootstrap_entries(&embedding_provider, &bootstrap_chunks)?;
         vector_index
@@ -1778,6 +1779,46 @@ fn read_i64_field(snapshot: &Value, key: &str) -> i64 {
         .get(key)
         .and_then(Value::as_i64)
         .unwrap_or_default()
+}
+
+fn ensure_startup_connectome_repair(repository: &mut SqliteRepository) -> Result<(), String> {
+    let has_active_repair = repository
+        .find_active_repair_task(DEFAULT_NAMESPACE, "connectome_rebuild", "namespace")
+        .map_err(|error| format!("failed to inspect connectome repair queue: {error}"))?
+        .is_some();
+    if has_active_repair {
+        return Ok(());
+    }
+
+    let requires_repair = repository
+        .connectome_requires_repair(DEFAULT_NAMESPACE)
+        .map_err(|error| format!("failed to inspect connectome consistency: {error}"))?;
+    if !requires_repair {
+        return Ok(());
+    }
+
+    let payload_json = json!({
+        "deleted_chunk_ids": [],
+        "reason": "startup_connectome_bootstrap",
+    })
+    .to_string();
+    let task_id = repository
+        .enqueue_repair_task(
+            DEFAULT_NAMESPACE,
+            "connectome_rebuild",
+            "namespace",
+            None,
+            Some(&payload_json),
+        )
+        .map_err(|error| format!("failed to enqueue startup connectome repair: {error}"))?;
+    warn!(
+        event = "server.bootstrap.connectome_repair_enqueued",
+        namespace = DEFAULT_NAMESPACE,
+        task_id = task_id,
+        "startup detected missing connectome edges and enqueued rebuild repair"
+    );
+
+    Ok(())
 }
 
 fn load_job(repository: &SqliteRepository, job_id: i64) -> Result<MaintenanceJob, AppStateError> {
