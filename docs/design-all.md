@@ -39,6 +39,10 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 - `Cortex` 已有 bootstrap 版 facade，可插入、查询，并支持 archive 快照往返与损坏边界校验。
 - `connectome` 已持久化，ingest 会根据 chunk tags 更新无向共现边。
 - `Synapse` 已能从 connectome 激活邻居信号。
+- `Thalamus` 已进入 recall 主链路：
+  - 为 query 生成 `worldview + entropy`
+  - 为 `tagmemo` 生成最小 gating 决策
+  - 把 gating 结果写入响应 metadata 与 `retrieval_log.params_snapshot`
 - `Recall` 已支持 `basic` 与 `tagmemo` 两种核心模式。
 - `tagmemo` 已具备最小实用语义：
   - 先做 vector recall
@@ -46,15 +50,28 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
   - 基于 connectome 激活关联 tags
   - 回填 `SpikeAssociation` 结果
   - 已覆盖超时检查与最终分数排序/截断
+- `SpikeAssociation` 结果已追加结构化 metadata，能够解释 seed tags、matched tags 与关联分数。
+- `retrieval_log` 已补齐 `spike_depth / emergent_count` 基础写入。
+- `/metrics` 已能暴露最近 recall 的 telemetry：
+  - worldview 分布
+  - entropy 平均值
+  - spike depth 平均值
+  - emergent 总量
+  - `Vector / SpikeAssociation` 来源结果总量
+  - association gate 的 allowed / blocked 次数
+- `Cerebellum` 已具备 design.all 相关修复闭环：
+  - forget 后自动排入 `connectome_rebuild`
+  - repair worker 可消费 `connectome_rebuild`
+  - 启动时若发现 connectome 缺失且存在多 tag chunk，会自动补排修复任务
 
 ### 3.2 未落地或仅有骨架
 
 - 真正的 HNSW 分层图与 mmap/rkyv 持久化尚未实现，当前 `Cortex` 仍以 bootstrap 后端为主。
-- `Thalamus` 目前只有最小 `worldview + entropy` 占位分析，尚未接入 recall 主链路。
+- `Thalamus` 目前只有最小 gating baseline，还没有 `focus / gravity field / query decomposition`。
 - `WeakSignal` / `Tide` / `gravity field` 尚未形成生产可用的召回阶段。
 - `Synapse` 当前不是完整 LIF engine，没有 spike trace、涌现检测、STDP 可塑性。
-- `Cerebellum` 还没有 connectome repair、dream、compaction 等后台任务闭环。
-- `repair_queue` 已存在，但围绕 design.all 的专项修复流程未完整打通。
+- `Cerebellum` 还没有 dream、compaction、archive refresh 等后台流程。
+- `repair_queue` 已可承接 connectome 修复，但尚未形成更细粒度的校验/压缩作业体系。
 - MCP、多语言 SDK、WASM、安全过滤、多租户等均未落地为可发布能力。
 
 ## 4. 设计原则
@@ -151,8 +168,9 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 
 当前态：
 
-- 只有最小 `Thalamus::analyze(query, depth)` 占位实现
-- 尚未进入 recall 主路径
+- `Thalamus::analyze(query, depth)` 已进入 recall 主路径
+- 已能输出最小 `worldview / entropy / route gate`
+- 当前 gate 只控制 `tagmemo`，不会提前扩展为真正的 `Tide`
 
 #### Hippocampus
 
@@ -179,7 +197,9 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 
 当前态：
 
-- 只有最小任务调度门面
+- 已能消费 `repair_queue`
+- 已闭环 `connectome_rebuild` 修复任务
+- 启动恢复阶段能够发现缺失 connectome 并自动补排修复
 
 ## 6. 数据模型与存储边界
 
@@ -252,6 +272,7 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 #### `tagmemo`
 
 - 先执行 `basic`
+- 通过 `Thalamus` 判断是否允许联想扩散
 - 若结果不足，则自动提取 seed tags
 - 通过 `Synapse` 激活 connectome 邻居
 - 用关联 tags 回拉 chunk
@@ -272,12 +293,14 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 - soft delete
 - 基础 rebuild job
 - repair queue 基础设施
+- forget 后的 connectome repair
+- 启动时的 connectome 缺失恢复
 
 但 design.all 视角下仍未完成：
 
-- connectome 回补/重建
 - archive 恢复后的拓扑一致性修复
 - Synapse / Cortex 联合重建策略
+- 更细粒度的 connectome 校验任务
 
 ## 8. Recall 模式路线图
 
@@ -303,9 +326,9 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 
 当前距离该目标的关键缺口是：
 
-- `Thalamus` 还未进入 recall pipeline
 - `WeakSignal` 结果源尚不存在
 - 统一重排还没有融合 worldview / entropy / gravity
+- `Thalamus` 当前只提供最小 gate，尚未产出更丰富的 recall plan
 
 ## 10. 恢复、修复与后台任务
 
@@ -324,11 +347,17 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 
 ### 10.2 Connectome maintenance
 
-目标需要新增：
+当前已具备：
 
-- connectome 重建任务
-- connectome 校验任务
-- forget/rebuild 后的边一致性修复
+- forget 后触发 `connectome_rebuild`
+- repair worker 可执行 `connectome_rebuild`
+- 启动恢复时自动检测“connectome 为空但多 tag chunk 仍存在”的缺口并排入修复
+
+仍需补齐：
+
+- 更严格的 connectome 校验任务
+- archive 恢复后的边一致性修复
+- 非空但部分漂移场景的自动检测
 
 ### 10.3 Cerebellum 任务类型
 
@@ -352,7 +381,8 @@ design.all 不是只能“跑出结果”，而是要可解释、可归因、可
 - repair queue 状态
 - rebuild / repair age
 - 各来源结果占比：`Vector / WeakSignal / SpikeAssociation`
-- 后续补齐：worldview、entropy、spike depth、emergent count
+- worldview、entropy、spike depth、emergent count
+- association gate allowed / blocked 统计
 
 ## 12. 明确不做的事
 
@@ -388,7 +418,7 @@ design.all 不是只能“跑出结果”，而是要可解释、可归因、可
 - 建立 query gating 基线
 - 为后续 `tide` 留稳定接口
 
-状态：下一优先级
+状态：已完成最小基线
 
 ### Phase 3：Connectome repair 与后台闭环
 
@@ -398,7 +428,7 @@ design.all 不是只能“跑出结果”，而是要可解释、可归因、可
 - Cerebellum 任务闭环
 - forget/rebuild 后的拓扑一致性
 
-状态：未开始
+状态：已完成最小闭环，仍需继续深化
 
 ### Phase 4：Cortex 真正持久化
 
@@ -425,9 +455,9 @@ design.all 不是只能“跑出结果”，而是要可解释、可归因、可
 
 按当前仓库状态，建议后续实现顺序为：
 
-1. `Thalamus` 最小接入 recall，先把 `worldview + entropy` 真实写入 `retrieval_log` 与响应 metadata。
-2. 补 `connectome` 修复与重建任务，让 topology 在 forget/rebuild 后可恢复。
-3. 再推进 `Cortex` 的真正持久化，而不是继续在 API 层扩散未落地模式。
+1. 推进 `Cortex` 的真正持久化，把 bootstrap archive 演进到可恢复的 HNSW + mmap/rkyv。
+2. 继续细化 `Cerebellum` 的 connectome 校验与 archive 恢复后拓扑修复，而不只停留在启动补排。
+3. 为 `Thalamus` 补更明确的 recall plan 输出，再为未来 `Tide / WeakSignal` 留出稳定入口。
 
 ## 15. 验收标准
 
@@ -453,5 +483,8 @@ Seahorse 的 `design.all` 不应该继续停留在“宏大蓝图文档”，而
 - connectome 持久化
 - synapse 最小激活
 - tagmemo 最小联想召回
+- thalamus 最小 gating
+- recent recall telemetry
+- cerebellum 最小 connectome 恢复闭环
 
 接下来的关键，不是继续铺更大的概念，而是把 `Thalamus`、`Cerebellum` 和 `Cortex` 的剩余闭环按阶段补齐，直到 Seahorse 真正成为一个可运行、可恢复、可审计的认知记忆引擎。
