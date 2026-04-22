@@ -41,6 +41,7 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 - `Synapse` 已能从 connectome 激活邻居信号。
 - `Thalamus` 已进入 recall 主链路：
   - 为 query 生成 `worldview + entropy`
+  - 为 query 生成最小 `focus_terms`
   - 为 `tagmemo` 生成最小 gating 决策
   - 把 gating 结果写入响应 metadata 与 `retrieval_log.params_snapshot`
 - `Recall` 已支持 `basic` 与 `tagmemo` 两种核心模式。
@@ -62,12 +63,17 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 - `Cerebellum` 已具备 design.all 相关修复闭环：
   - forget 后自动排入 `connectome_rebuild`
   - repair worker 可消费 `connectome_rebuild`
-  - 启动时若发现 connectome 缺失且存在多 tag chunk，会自动补排修复任务
+  - 启动时若发现 connectome 缺失或 drift，会自动补排修复任务
+- `connectome` 已具备最小健康校验：
+  - 可检测 missing edges
+  - 可检测 stale edges
+  - 可检测 cooccur / weight mismatch
+  - `/metrics` 已暴露 drift gauges
 
 ### 3.2 未落地或仅有骨架
 
 - 真正的 HNSW 分层图与 mmap/rkyv 持久化尚未实现，当前 `Cortex` 仍以 bootstrap 后端为主。
-- `Thalamus` 目前只有最小 gating baseline，还没有 `focus / gravity field / query decomposition`。
+- `Thalamus` 目前已有最小 `focus_terms + gating baseline`，但还没有更完整的 `query decomposition / gravity field`。
 - `WeakSignal` / `Tide` / `gravity field` 尚未形成生产可用的召回阶段。
 - `Synapse` 当前不是完整 LIF engine，没有 spike trace、涌现检测、STDP 可塑性。
 - `Cerebellum` 还没有 dream、compaction、archive refresh 等后台流程。
@@ -169,7 +175,7 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 当前态：
 
 - `Thalamus::analyze(query, depth)` 已进入 recall 主路径
-- 已能输出最小 `worldview / entropy / route gate`
+- 已能输出最小 `worldview / entropy / focus_terms / route gate`
 - 当前 gate 只控制 `tagmemo`，不会提前扩展为真正的 `Tide`
 
 #### Hippocampus
@@ -295,6 +301,7 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 - repair queue 基础设施
 - forget 后的 connectome repair
 - 启动时的 connectome 缺失恢复
+- 启动时的 connectome drift 恢复
 
 但 design.all 视角下仍未完成：
 
@@ -328,7 +335,7 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 
 - `WeakSignal` 结果源尚不存在
 - 统一重排还没有融合 worldview / entropy / gravity
-- `Thalamus` 当前只提供最小 gate，尚未产出更丰富的 recall plan
+- `Thalamus` 当前只提供最小 focus + gate，尚未产出更丰富的 recall plan
 
 ## 10. 恢复、修复与后台任务
 
@@ -351,13 +358,13 @@ Seahorse 的最终目标不是通用向量数据库，也不是 LLM 生成框架
 
 - forget 后触发 `connectome_rebuild`
 - repair worker 可执行 `connectome_rebuild`
-- 启动恢复时自动检测“connectome 为空但多 tag chunk 仍存在”的缺口并排入修复
+- 启动恢复时自动检测 connectome 的缺边或 drift 并排入修复
 
 仍需补齐：
 
 - 更严格的 connectome 校验任务
 - archive 恢复后的边一致性修复
-- 非空但部分漂移场景的自动检测
+- 更高阶的 connectome 漂移解释与分层修复策略
 
 ### 10.3 Cerebellum 任务类型
 
