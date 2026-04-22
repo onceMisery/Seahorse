@@ -194,6 +194,16 @@ pub struct RepairTask {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct ConnectomeEdgeRecord {
+    pub namespace: String,
+    pub source_tag: String,
+    pub target_tag: String,
+    pub weight: f64,
+    pub cooccur_count: i64,
+    pub last_updated: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct CachedEmbedding {
     pub id: i64,
     pub namespace: String,

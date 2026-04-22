@@ -1,13 +1,13 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::models::{
-    CachedEmbedding, ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, MaintenanceJob,
-    PersistedChunk, PersistedDeletion, PersistedFile, PersistedIngest, PersistedReplacement,
-    RebuildChunkRecord, RecallChunkRecord, RepairTask, RetrievalLogRecord, RetrievalLogWrite,
-    StorageStatsSnapshot, TagWrite,
+    CachedEmbedding, ChunkTagInsert, ChunkWrite, ConnectomeEdgeRecord, FileWrite, IngestWriteBatch,
+    MaintenanceJob, PersistedChunk, PersistedDeletion, PersistedFile, PersistedIngest,
+    PersistedReplacement, RebuildChunkRecord, RecallChunkRecord, RepairTask, RetrievalLogRecord,
+    RetrievalLogWrite, StorageStatsSnapshot, TagWrite,
 };
 use super::schema::{validate_schema_meta, SchemaExpectation, SchemaMetaSnapshot};
 use super::{StorageError, StorageResult};
@@ -299,6 +299,63 @@ impl SqliteRepository {
             logs.push(row?);
         }
         Ok(logs)
+    }
+
+    pub fn list_connectome_neighbors(
+        &self,
+        namespace: &str,
+        tag_normalized_name: &str,
+        limit: usize,
+    ) -> StorageResult<Vec<ConnectomeEdgeRecord>> {
+        let limit = limit.max(1).min(i64::MAX as usize) as i64;
+        let mut statement = self.connection.prepare(
+            "SELECT
+                namespace,
+                source_tag,
+                target_tag,
+                weight,
+                cooccur_count,
+                last_updated
+             FROM (
+                SELECT
+                    c.namespace AS namespace,
+                    src.normalized_name AS source_tag,
+                    dst.normalized_name AS target_tag,
+                    c.weight AS weight,
+                    c.cooccur_count AS cooccur_count,
+                    c.last_updated AS last_updated
+                FROM connectome c
+                JOIN tags src ON src.id = c.tag_i
+                JOIN tags dst ON dst.id = c.tag_j
+                WHERE c.namespace = ?1
+                  AND src.normalized_name = ?2
+                UNION ALL
+                SELECT
+                    c.namespace AS namespace,
+                    src.normalized_name AS source_tag,
+                    dst.normalized_name AS target_tag,
+                    c.weight AS weight,
+                    c.cooccur_count AS cooccur_count,
+                    c.last_updated AS last_updated
+                FROM connectome c
+                JOIN tags src ON src.id = c.tag_j
+                JOIN tags dst ON dst.id = c.tag_i
+                WHERE c.namespace = ?1
+                  AND src.normalized_name = ?2
+             )
+             ORDER BY cooccur_count DESC, weight DESC, target_tag ASC
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![namespace, tag_normalized_name.to_ascii_lowercase(), limit],
+            map_connectome_edge_record,
+        )?;
+
+        let mut edges = Vec::new();
+        for row in rows {
+            edges.push(row?);
+        }
+        Ok(edges)
     }
 
     pub fn with_transaction<T, F>(&mut self, operation: F) -> StorageResult<T>
@@ -1139,6 +1196,17 @@ fn map_retrieval_log_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<Retriev
     })
 }
 
+fn map_connectome_edge_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectomeEdgeRecord> {
+    Ok(ConnectomeEdgeRecord {
+        namespace: row.get(0)?,
+        source_tag: row.get(1)?,
+        target_tag: row.get(2)?,
+        weight: row.get(3)?,
+        cooccur_count: row.get(4)?,
+        last_updated: row.get(5)?,
+    })
+}
+
 fn serialize_embedding(vector: &[f32]) -> Vec<u8> {
     let mut blob = Vec::with_capacity(vector.len() * std::mem::size_of::<f32>());
     for value in vector {
@@ -1196,6 +1264,7 @@ fn write_ingest_batch(
         tag_ids.insert(tag.normalized_name.clone(), tag_id);
     }
 
+    let mut chunk_tag_pairs = BTreeMap::<i64, Vec<i64>>::new();
     for link in &batch.chunk_tags {
         let chunk_id = chunk_ids.get(&link.chunk_index).copied().ok_or_else(|| {
             StorageError::InvalidBatchReference {
@@ -1212,6 +1281,14 @@ fn write_ingest_batch(
                 ),
             })?;
         insert_chunk_tag(transaction, chunk_id, tag_id, link)?;
+        chunk_tag_pairs
+            .entry(link.chunk_index)
+            .or_default()
+            .push(tag_id);
+    }
+
+    for tag_ids in chunk_tag_pairs.values() {
+        update_connectome_for_chunk_tags(transaction, &batch.file.namespace, tag_ids)?;
     }
 
     Ok(PersistedIngest {
@@ -1467,6 +1544,56 @@ fn insert_chunk_tag(
     transaction.execute(
         "UPDATE tags SET usage_count = usage_count + 1 WHERE id = ?1",
         [tag_id],
+    )?;
+
+    Ok(())
+}
+
+fn update_connectome_for_chunk_tags(
+    transaction: &Transaction<'_>,
+    namespace: &str,
+    tag_ids: &[i64],
+) -> StorageResult<()> {
+    let unique_tag_ids = tag_ids.iter().copied().collect::<BTreeSet<_>>();
+    let ordered_tag_ids = unique_tag_ids.into_iter().collect::<Vec<_>>();
+
+    for left_index in 0..ordered_tag_ids.len() {
+        for right_index in (left_index + 1)..ordered_tag_ids.len() {
+            let tag_i = ordered_tag_ids[left_index];
+            let tag_j = ordered_tag_ids[right_index];
+            upsert_connectome_edge(transaction, namespace, tag_i, tag_j)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn upsert_connectome_edge(
+    transaction: &Transaction<'_>,
+    namespace: &str,
+    tag_i: i64,
+    tag_j: i64,
+) -> StorageResult<()> {
+    let (tag_i, tag_j) = if tag_i <= tag_j {
+        (tag_i, tag_j)
+    } else {
+        (tag_j, tag_i)
+    };
+
+    transaction.execute(
+        "INSERT INTO connectome (
+            namespace,
+            tag_i,
+            tag_j,
+            weight,
+            cooccur_count
+        ) VALUES (?1, ?2, ?3, 1.0, 1)
+        ON CONFLICT(namespace, tag_i, tag_j)
+        DO UPDATE SET
+            cooccur_count = connectome.cooccur_count + 1,
+            weight = CAST(connectome.cooccur_count + 1 AS REAL),
+            last_updated = CURRENT_TIMESTAMP",
+        params![namespace, tag_i, tag_j],
     )?;
 
     Ok(())
@@ -2072,5 +2199,101 @@ mod tests {
         assert_eq!(logs[1].query_hash, "hash-alpha");
         assert_eq!(logs[1].result_count, 2);
         assert_eq!(logs[1].params_snapshot.as_deref(), Some("{\"top_k\":5}"));
+    }
+
+    #[test]
+    fn writes_connectome_edges_from_chunk_tag_cooccurrence() {
+        let mut repository = repository_with_schema();
+        let batch = IngestWriteBatch {
+            file: FileWrite::new("connectome.txt", "hash-connectome"),
+            chunks: vec![ChunkWrite::new(
+                0,
+                "project rust memory",
+                "chunk-connectome",
+                "test-model",
+                3,
+            )],
+            tags: vec![
+                TagWrite::new("Project", "project"),
+                TagWrite::new("Rust", "rust"),
+                TagWrite::new("Memory", "memory"),
+            ],
+            chunk_tags: vec![
+                ChunkTagInsert::new(0, "project"),
+                ChunkTagInsert::new(0, "rust"),
+                ChunkTagInsert::new(0, "memory"),
+            ],
+        };
+
+        repository
+            .write_ingest_batch(&batch)
+            .expect("write connectome batch");
+
+        let neighbors = repository
+            .list_connectome_neighbors("default", "project", 10)
+            .expect("list connectome neighbors");
+
+        assert_eq!(neighbors.len(), 2);
+        assert_eq!(neighbors[0].source_tag, "project");
+        assert_eq!(neighbors[0].cooccur_count, 1);
+        assert!(neighbors.iter().any(|edge| edge.target_tag == "memory"));
+        assert!(neighbors.iter().any(|edge| edge.target_tag == "rust"));
+    }
+
+    #[test]
+    fn increments_connectome_cooccurrence_across_batches() {
+        let mut repository = repository_with_schema();
+        let first_batch = IngestWriteBatch {
+            file: FileWrite::new("first.txt", "hash-connectome-first"),
+            chunks: vec![ChunkWrite::new(
+                0,
+                "project rust",
+                "chunk-connectome-first",
+                "test-model",
+                3,
+            )],
+            tags: vec![
+                TagWrite::new("Project", "project"),
+                TagWrite::new("Rust", "rust"),
+            ],
+            chunk_tags: vec![
+                ChunkTagInsert::new(0, "project"),
+                ChunkTagInsert::new(0, "rust"),
+            ],
+        };
+        let second_batch = IngestWriteBatch {
+            file: FileWrite::new("second.txt", "hash-connectome-second"),
+            chunks: vec![ChunkWrite::new(
+                0,
+                "project rust again",
+                "chunk-connectome-second",
+                "test-model",
+                3,
+            )],
+            tags: vec![
+                TagWrite::new("Project", "project"),
+                TagWrite::new("Rust", "rust"),
+            ],
+            chunk_tags: vec![
+                ChunkTagInsert::new(0, "project"),
+                ChunkTagInsert::new(0, "rust"),
+            ],
+        };
+
+        repository
+            .write_ingest_batch(&first_batch)
+            .expect("write first connectome batch");
+        repository
+            .write_ingest_batch(&second_batch)
+            .expect("write second connectome batch");
+
+        let neighbors = repository
+            .list_connectome_neighbors("default", "project", 10)
+            .expect("list connectome neighbors");
+
+        assert_eq!(neighbors.len(), 1);
+        assert_eq!(neighbors[0].target_tag, "rust");
+        assert_eq!(neighbors[0].cooccur_count, 2);
+        assert_eq!(neighbors[0].weight, 2.0);
     }
 }
