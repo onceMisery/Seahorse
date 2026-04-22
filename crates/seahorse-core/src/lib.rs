@@ -13,8 +13,9 @@ pub mod synapse;
 pub mod thalamus;
 
 pub use cerebellum::{Cerebellum, CerebellumConfig, ScheduledTask};
+pub use cortex::archive::CortexArchiveError;
 pub use cortex::archive::{CortexArchiveHeader, CortexArchiveSnapshot};
-pub use cortex::hnsw::{BootstrapHnswConfig, BootstrapHnswIndex};
+pub use cortex::hnsw::{BootstrapHnswConfig, BootstrapHnswEntry, BootstrapHnswIndex};
 pub use cortex::{Cortex, CortexConfig};
 pub use embedding::{
     EmbeddingError, EmbeddingProvider, EmbeddingResult, StubEmbeddingProvider, StubFailureMode,

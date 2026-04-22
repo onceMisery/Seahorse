@@ -1,7 +1,8 @@
 pub mod archive;
 pub mod hnsw;
 
-use archive::CortexArchiveHeader;
+use crate::index::{IndexEntry, IndexResult, SearchHit, SearchRequest};
+use archive::{CortexArchiveHeader, CortexArchiveSnapshot};
 use hnsw::{BootstrapHnswConfig, BootstrapHnswIndex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,5 +40,17 @@ impl Cortex {
 
     pub fn archive_header(&self) -> CortexArchiveHeader {
         CortexArchiveHeader::new(self.index.dimension())
+    }
+
+    pub fn insert(&mut self, entries: &[IndexEntry]) -> IndexResult<()> {
+        self.index.insert(entries)
+    }
+
+    pub fn search(&self, request: &SearchRequest) -> IndexResult<Vec<SearchHit>> {
+        self.index.search(request)
+    }
+
+    pub fn snapshot(&self) -> CortexArchiveSnapshot {
+        CortexArchiveSnapshot::from_index(&self.index)
     }
 }
