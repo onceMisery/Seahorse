@@ -3,11 +3,7 @@ use axum::{
     Router,
 };
 
-use crate::{
-    config::ObservabilityConfig,
-    handlers,
-    state::AppState,
-};
+use crate::{config::ObservabilityConfig, handlers, state::AppState};
 
 pub fn build_app(state: AppState) -> Router {
     let observability_config = ObservabilityConfig::default();
@@ -34,11 +30,9 @@ pub fn build_app_with_observability(
         );
     }
 
-    app
-        .with_state(state)
-        .route_layer(axum::middleware::from_fn(
-            crate::api::observability::request_context_middleware,
-        ))
+    app.with_state(state).route_layer(axum::middleware::from_fn(
+        crate::api::observability::request_context_middleware,
+    ))
 }
 
 pub fn build_test_app(_name: &str) -> Router {
@@ -295,12 +289,10 @@ mod tests {
             stale_body["data"]["job_id"],
             Value::String(format!("job-{stale_job_id}"))
         );
-        assert!(
-            stale_body["data"]["error_message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("superseded during startup recovery")
-        );
+        assert!(stale_body["data"]["error_message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("superseded during startup recovery"));
 
         cleanup_db_path(&db_path);
     }
@@ -335,12 +327,10 @@ mod tests {
             final_body["data"]["status"],
             Value::String("failed".to_owned())
         );
-        assert!(
-            final_body["data"]["error_message"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("invalid rebuild job scope")
-        );
+        assert!(final_body["data"]["error_message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("invalid rebuild job scope"));
 
         cleanup_db_path(&db_path);
     }

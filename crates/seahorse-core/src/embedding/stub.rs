@@ -50,12 +50,10 @@ impl StubEmbeddingProvider {
 
     fn check_failure_mode(&self) -> EmbeddingResult<()> {
         match &self.failure_mode {
-            Some(StubFailureMode::Timeout { timeout_ms }) => {
-                Err(EmbeddingError::ProviderTimeout {
-                    provider: "stub",
-                    timeout_ms: *timeout_ms,
-                })
-            }
+            Some(StubFailureMode::Timeout { timeout_ms }) => Err(EmbeddingError::ProviderTimeout {
+                provider: "stub",
+                timeout_ms: *timeout_ms,
+            }),
             Some(StubFailureMode::Failure { message }) => Err(EmbeddingError::ProviderFailure {
                 provider: "stub",
                 message: message.clone(),

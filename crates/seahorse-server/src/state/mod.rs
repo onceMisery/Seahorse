@@ -19,6 +19,7 @@ use seahorse_core::{
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::json;
+use tracing::{debug, error, info, warn};
 
 use crate::config::{load_server_config_default, ServerConfig};
 
@@ -318,6 +319,14 @@ impl AppState {
                 .map_err(|error| format!("failed to derive initial index state: {error}"))?
         };
         sync_runtime_schema_meta(&mut repository, &embedding_provider, &initial_index_state)?;
+        info!(
+            event = "server.bootstrap.ready",
+            db_path = db_path,
+            bootstrap_chunk_count = bootstrap_chunks.len(),
+            index_state = %initial_index_state,
+            has_active_rebuild = has_active_rebuild,
+            "application state initialized"
+        );
         let db_label = if db_path == ":memory:" {
             "sqlite-memory".to_owned()
         } else {
@@ -430,6 +439,14 @@ impl AppState {
         request: CoreRebuildRequest,
         force: bool,
     ) -> Result<MaintenanceJob, AppStateError> {
+        let scope = request.scope.as_str().to_owned();
+        info!(
+            event = "rebuild.submit.received",
+            namespace = %request.namespace,
+            scope = %scope,
+            force = force,
+            "rebuild submission received"
+        );
         let job = {
             let mut services = self
                 .services
@@ -444,6 +461,14 @@ impl AppState {
                 .map_err(AppStateError::Storage)?
             {
                 if !force {
+                    info!(
+                        event = "rebuild.submit.reused_active_job",
+                        namespace = %request.namespace,
+                        scope = %scope,
+                        active_job_id = active_job.id,
+                        active_job_status = %active_job.status,
+                        "reusing active rebuild job"
+                    );
                     return Ok(active_job);
                 }
 
@@ -455,6 +480,12 @@ impl AppState {
                         "superseded by force rebuild request",
                     )
                     .map_err(AppStateError::Storage)?;
+                warn!(
+                    event = "rebuild.submit.cancelled_active_jobs",
+                    namespace = %request.namespace,
+                    scope = %scope,
+                    "force rebuild cancelled active rebuild jobs"
+                );
             }
 
             let payload_json = json!({
@@ -467,14 +498,39 @@ impl AppState {
                 .create_maintenance_job("rebuild", &request.namespace, Some(&payload_json))
                 .map_err(AppStateError::Storage)?
         };
+        info!(
+            event = "rebuild.job.queued",
+            namespace = %job.namespace,
+            scope = %scope,
+            force = force,
+            job_id = job.id,
+            "rebuild job queued"
+        );
 
         if let Err(error) = self.spawn_rebuild_worker(job.id, request) {
             let error_message = format!("failed to spawn rebuild worker: {error}");
+            error!(
+                event = "rebuild.worker.spawn_failed",
+                namespace = %job.namespace,
+                scope = %scope,
+                force = force,
+                job_id = job.id,
+                error = %error,
+                "failed to spawn rebuild worker"
+            );
             let _ = self.fail_rebuild_submission(job.id, &job.namespace, &error_message);
             return Err(AppStateError::Unavailable {
                 message: "failed to spawn rebuild worker",
             });
         }
+        info!(
+            event = "rebuild.worker.spawned",
+            namespace = %job.namespace,
+            scope = %scope,
+            force = force,
+            job_id = job.id,
+            "rebuild worker spawned"
+        );
 
         Ok(job)
     }
@@ -571,6 +627,11 @@ impl AppState {
                     format!("failed to query active rebuild jobs during startup recovery: {error}")
                 })?;
             let Some(latest_job) = active_jobs.first().cloned() else {
+                debug!(
+                    event = "rebuild.startup.no_active_job",
+                    namespace = DEFAULT_NAMESPACE,
+                    "startup recovery found no active rebuild job"
+                );
                 return Ok(());
             };
 
@@ -584,15 +645,35 @@ impl AppState {
                             stale_job.id
                         )
                     })?;
+                warn!(
+                    event = "rebuild.startup.cancel_stale_job",
+                    namespace = %stale_job.namespace,
+                    stale_job_id = stale_job.id,
+                    "cancelled stale rebuild job during startup recovery"
+                );
             }
 
             latest_job
         };
         let job = active_job;
+        info!(
+            event = "rebuild.startup.recover_active_job",
+            namespace = %job.namespace,
+            job_id = job.id,
+            status = %job.status,
+            "startup recovery will resume active rebuild job"
+        );
 
         let request = match rebuild_request_from_job(&job) {
             Ok(request) => request,
             Err(message) => {
+                error!(
+                    event = "rebuild.startup.invalid_job_payload",
+                    namespace = %job.namespace,
+                    job_id = job.id,
+                    reason = %message,
+                    "startup recovery found invalid rebuild job payload"
+                );
                 let _ = self.fail_rebuild_submission(job.id, &job.namespace, &message);
                 return Ok(());
             }
@@ -600,7 +681,21 @@ impl AppState {
 
         if let Err(error) = self.spawn_rebuild_worker(job.id, request) {
             let error_message = format!("failed to resume rebuild worker: {error}");
+            error!(
+                event = "rebuild.startup.resume_worker_failed",
+                namespace = %job.namespace,
+                job_id = job.id,
+                error = %error,
+                "startup recovery failed to resume rebuild worker"
+            );
             let _ = self.fail_rebuild_submission(job.id, &job.namespace, &error_message);
+        } else {
+            info!(
+                event = "rebuild.startup.resume_worker_spawned",
+                namespace = %job.namespace,
+                job_id = job.id,
+                "startup recovery resumed rebuild worker"
+            );
         }
 
         Ok(())
@@ -621,11 +716,36 @@ impl AppState {
     }
 
     fn run_rebuild_job(&self, job_id: i64, request: CoreRebuildRequest) {
+        let scope = request.scope.as_str().to_owned();
+        info!(
+            event = "rebuild.job.started",
+            namespace = %request.namespace,
+            scope = %scope,
+            job_id = job_id,
+            "rebuild worker started"
+        );
         let work = match self.prepare_rebuild_job(job_id, &request) {
             Ok(Some(work)) => work,
-            Ok(None) => return,
+            Ok(None) => {
+                warn!(
+                    event = "rebuild.job.cancelled_before_start",
+                    namespace = %request.namespace,
+                    scope = %scope,
+                    job_id = job_id,
+                    "rebuild job already cancelled before execution"
+                );
+                return;
+            }
             Err(error) => {
                 let error_message = error.to_string();
+                error!(
+                    event = "rebuild.job.prepare_failed",
+                    namespace = %request.namespace,
+                    scope = %scope,
+                    job_id = job_id,
+                    error = %error_message,
+                    "failed to prepare rebuild job"
+                );
                 let _ = self.fail_rebuild_submission(job_id, &request.namespace, &error_message);
                 return;
             }
@@ -635,6 +755,14 @@ impl AppState {
             Ok(entries) => entries,
             Err(error) => {
                 let error_message = error.to_string();
+                error!(
+                    event = "rebuild.job.embedding_failed",
+                    namespace = %work.namespace,
+                    scope = %scope,
+                    job_id = job_id,
+                    error = %error_message,
+                    "failed to build rebuild vectors"
+                );
                 let _ = self.fail_rebuild_submission(job_id, &work.namespace, &error_message);
                 return;
             }
@@ -642,7 +770,24 @@ impl AppState {
 
         if let Err(error) = self.apply_rebuild_result(job_id, &work, &entries) {
             let error_message = error.to_string();
+            error!(
+                event = "rebuild.job.apply_failed",
+                namespace = %work.namespace,
+                scope = %scope,
+                job_id = job_id,
+                error = %error_message,
+                "failed to apply rebuild result"
+            );
             let _ = self.fail_rebuild_submission(job_id, &work.namespace, &error_message);
+        } else {
+            info!(
+                event = "rebuild.job.completed",
+                namespace = %work.namespace,
+                scope = %scope,
+                job_id = job_id,
+                indexed_chunk_count = work.chunks.len(),
+                "rebuild worker completed"
+            );
         }
     }
 
@@ -659,6 +804,13 @@ impl AppState {
             })?;
         let job = load_job(&services.repository, job_id)?;
         if job.status == "cancelled" {
+            warn!(
+                event = "rebuild.job.prepare_cancelled",
+                namespace = %request.namespace,
+                scope = %request.scope.as_str(),
+                job_id = job_id,
+                "rebuild job is cancelled and will not run"
+            );
             return Ok(None);
         }
         let provider = self.embedding_provider.clone();
@@ -681,6 +833,16 @@ impl AppState {
             .repository
             .set_schema_meta_value("index_state", "rebuilding")
             .map_err(AppStateError::Storage)?;
+        info!(
+            event = "rebuild.job.running",
+            namespace = %request.namespace,
+            scope = %request.scope.as_str(),
+            job_id = job_id,
+            chunk_count = chunks.len(),
+            progress = %progress,
+            index_state = "rebuilding",
+            "rebuild job marked running"
+        );
 
         Ok(Some(PreparedRebuildWork {
             namespace: request.namespace.clone(),
@@ -705,6 +867,13 @@ impl AppState {
                 })?;
             let job = load_job(&services.repository, job_id)?;
             if job.status == "cancelled" {
+                warn!(
+                    event = "rebuild.job.cancelled_during_execution",
+                    namespace = %work.namespace,
+                    scope = %work.scope.as_str(),
+                    job_id = job_id,
+                    "rebuild job cancelled while worker was running"
+                );
                 self.restore_index_state_after_cancel(&mut services.repository, &work.namespace)?;
                 return Ok(());
             }
@@ -775,6 +944,16 @@ impl AppState {
                 None,
             )
             .map_err(AppStateError::Storage)?;
+        info!(
+            event = "rebuild.job.succeeded",
+            namespace = %work.namespace,
+            scope = %work.scope.as_str(),
+            job_id = job_id,
+            indexed_chunk_count = chunk_ids.len(),
+            progress = %progress,
+            index_state = "ready",
+            "rebuild job completed successfully"
+        );
 
         Ok(())
     }
@@ -793,6 +972,12 @@ impl AppState {
             })?;
         let job = load_job(&services.repository, job_id)?;
         if job.status == "cancelled" {
+            warn!(
+                event = "rebuild.job.fail_ignored_cancelled",
+                namespace = %namespace,
+                job_id = job_id,
+                "skip marking failed because rebuild job is already cancelled"
+            );
             self.restore_index_state_after_cancel(&mut services.repository, namespace)?;
             return Ok(());
         }
@@ -803,6 +988,14 @@ impl AppState {
             .repository
             .finish_maintenance_job(job_id, "failed", None, None, Some(error_message))
             .map_err(AppStateError::Storage)?;
+        error!(
+            event = "rebuild.job.failed",
+            namespace = %namespace,
+            job_id = job_id,
+            fallback_index_state = %fallback_index_state,
+            error = %error_message,
+            "rebuild job marked failed"
+        );
 
         if services
             .repository
@@ -814,6 +1007,13 @@ impl AppState {
                 .repository
                 .set_schema_meta_value("index_state", &fallback_index_state)
                 .map_err(AppStateError::Storage)?;
+            info!(
+                event = "rebuild.index_state.restored_after_failure",
+                namespace = %namespace,
+                job_id = job_id,
+                index_state = %fallback_index_state,
+                "index_state restored after rebuild failure"
+            );
         }
 
         Ok(())
@@ -829,6 +1029,11 @@ impl AppState {
             .map_err(AppStateError::Storage)?
             .is_some()
         {
+            debug!(
+                event = "rebuild.index_state.restore_skipped_active_exists",
+                namespace = %namespace,
+                "skip restoring index_state because active rebuild job still exists"
+            );
             return Ok(());
         }
 
@@ -837,6 +1042,12 @@ impl AppState {
         repository
             .set_schema_meta_value("index_state", &fallback_index_state)
             .map_err(AppStateError::Storage)?;
+        info!(
+            event = "rebuild.index_state.restored_after_cancel",
+            namespace = %namespace,
+            index_state = %fallback_index_state,
+            "index_state restored after rebuild cancellation"
+        );
 
         Ok(())
     }
@@ -848,6 +1059,14 @@ impl ServerRepairTaskExecutor {
         task: &RepairTask,
         payload: IndexInsertRepairPayload,
     ) -> Result<(), String> {
+        info!(
+            event = "repair.task.started",
+            task_id = task.id,
+            task_type = "index_insert",
+            namespace = %task.namespace,
+            chunk_count = payload.chunk_ids.len(),
+            "repair task started"
+        );
         if payload.chunk_ids.is_empty() {
             return Err(format!("repair task {} has empty chunk_ids", task.id));
         }
@@ -932,6 +1151,15 @@ impl ServerRepairTaskExecutor {
         let index_state = derive_index_state_after_repair(&repository, &task.namespace, task.id)
             .map_err(|error| format!("failed to derive repair index state: {error}"))?;
         sync_runtime_schema_meta(&mut repository, &self.embedding_provider, &index_state)?;
+        info!(
+            event = "repair.task.succeeded",
+            task_id = task.id,
+            task_type = "index_insert",
+            namespace = %task.namespace,
+            chunk_count = payload.chunk_ids.len(),
+            index_state = %index_state,
+            "repair task completed"
+        );
 
         Ok(())
     }
@@ -941,6 +1169,14 @@ impl ServerRepairTaskExecutor {
         task: &RepairTask,
         payload: IndexDeleteRepairPayload,
     ) -> Result<(), String> {
+        info!(
+            event = "repair.task.started",
+            task_id = task.id,
+            task_type = "index_delete",
+            namespace = %task.namespace,
+            chunk_count = payload.chunk_ids.len(),
+            "repair task started"
+        );
         if payload.chunk_ids.is_empty() {
             return Err(format!("repair task {} has empty chunk_ids", task.id));
         }
@@ -962,6 +1198,15 @@ impl ServerRepairTaskExecutor {
         let index_state = derive_index_state_after_repair(&repository, &task.namespace, task.id)
             .map_err(|error| format!("failed to derive repair index state: {error}"))?;
         sync_runtime_schema_meta(&mut repository, &self.embedding_provider, &index_state)?;
+        info!(
+            event = "repair.task.succeeded",
+            task_id = task.id,
+            task_type = "index_delete",
+            namespace = %task.namespace,
+            chunk_count = payload.chunk_ids.len(),
+            index_state = %index_state,
+            "repair task completed"
+        );
 
         Ok(())
     }
@@ -978,7 +1223,16 @@ impl RepairTaskExecutor for ServerRepairTaskExecutor {
                 let payload = parse_repair_payload::<IndexDeleteRepairPayload>(task)?;
                 self.execute_index_delete(task, payload)
             }
-            other => Err(format!("unsupported repair task_type: {other}")),
+            other => {
+                warn!(
+                    event = "repair.task.unsupported_type",
+                    task_id = task.id,
+                    namespace = %task.namespace,
+                    task_type = %other,
+                    "repair task has unsupported task_type"
+                );
+                Err(format!("unsupported repair task_type: {other}"))
+            }
         }
     }
 }
@@ -989,10 +1243,23 @@ fn run_repair_worker_loop(
     embedding_provider: StubEmbeddingProvider,
     vector_index: Arc<Mutex<RuntimeVectorIndex>>,
 ) {
+    info!(
+        event = "repair.worker.started",
+        namespace = DEFAULT_NAMESPACE,
+        db_path = %db_path,
+        "repair worker loop started"
+    );
     loop {
         let mut repository = match open_runtime_repository(&db_path) {
             Ok(repository) => repository,
-            Err(_) => {
+            Err(error) => {
+                warn!(
+                    event = "repair.worker.repository_open_failed",
+                    namespace = DEFAULT_NAMESPACE,
+                    db_path = %db_path,
+                    error = %error,
+                    "repair worker failed to open repository"
+                );
                 thread::sleep(REPAIR_POLL_INTERVAL);
                 continue;
             }
@@ -1005,17 +1272,40 @@ fn run_repair_worker_loop(
         let mut worker =
             match RepairWorker::new(&mut repository, &mut executor, repair_worker_config) {
                 Ok(worker) => worker,
-                Err(_) => return,
+                Err(error) => {
+                    error!(
+                        event = "repair.worker.init_failed",
+                        namespace = DEFAULT_NAMESPACE,
+                        db_path = %db_path,
+                        error = %error,
+                        "repair worker initialization failed"
+                    );
+                    return;
+                }
             };
 
         loop {
             match worker.run_once(DEFAULT_NAMESPACE) {
                 Ok(result) => {
+                    if result.scanned > 0 {
+                        info!(
+                            event = "repair.worker.batch_processed",
+                            namespace = DEFAULT_NAMESPACE,
+                            scanned = result.scanned,
+                            "repair worker processed batch"
+                        );
+                    }
                     if result.scanned == 0 {
                         thread::sleep(REPAIR_POLL_INTERVAL);
                     }
                 }
-                Err(_) => {
+                Err(error) => {
+                    warn!(
+                        event = "repair.worker.run_once_failed",
+                        namespace = DEFAULT_NAMESPACE,
+                        error = %error,
+                        "repair worker run failed and will retry"
+                    );
                     thread::sleep(REPAIR_POLL_INTERVAL);
                     break;
                 }

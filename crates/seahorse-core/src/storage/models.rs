@@ -201,3 +201,9 @@ pub struct StorageStatsSnapshot {
     pub repair_queue_size: usize,
     pub index_status: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusCount {
+    pub status: String,
+    pub count: usize,
+}

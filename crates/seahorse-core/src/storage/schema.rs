@@ -60,7 +60,11 @@ pub fn validate_schema_meta(
         &expected.schema_version,
         &snapshot.schema_version,
     )?;
-    ensure_exact_match("index_version", &expected.index_version, &snapshot.index_version)?;
+    ensure_exact_match(
+        "index_version",
+        &expected.index_version,
+        &snapshot.index_version,
+    )?;
     ensure_exact_match(
         "embedding_model_id",
         &expected.embedding_model_id,
@@ -166,12 +170,11 @@ mod tests {
             )
             .expect("update schema version");
 
-        let error =
-            validate_schema_meta(
-                &connection,
-                &SchemaExpectation::new(LATEST_SCHEMA_VERSION, "1", "unknown", 0),
-            )
-                .expect_err("schema should mismatch");
+        let error = validate_schema_meta(
+            &connection,
+            &SchemaExpectation::new(LATEST_SCHEMA_VERSION, "1", "unknown", 0),
+        )
+        .expect_err("schema should mismatch");
 
         match error {
             StorageError::InvalidSchemaMeta {

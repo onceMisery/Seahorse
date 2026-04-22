@@ -2,6 +2,7 @@ use axum::extract::{rejection::JsonRejection, State};
 use axum::http::StatusCode;
 use axum::Json;
 use seahorse_core::{RebuildError, RebuildRequest as CoreRebuildRequest, RebuildScope};
+use tracing::{info, warn};
 
 use crate::api::{self, AdminRebuildRequest, AdminRebuildResponseData};
 use crate::state::{AppState, AppStateError};
@@ -18,6 +19,11 @@ pub async fn post_rebuild(
     let Json(request) = match payload {
         Ok(json) => json,
         Err(error) => {
+            warn!(
+                event = "rebuild.request.invalid_json",
+                error = %error,
+                "rebuild request rejected"
+            );
             return api::error::<AdminRebuildResponseData>(
                 StatusCode::BAD_REQUEST,
                 "INVALID_INPUT",
@@ -27,10 +33,23 @@ pub async fn post_rebuild(
         }
     };
 
+    info!(
+        event = "rebuild.request.received",
+        namespace = %request.namespace,
+        scope = %request.scope.as_deref().unwrap_or("all"),
+        force = request.force,
+        "rebuild request received"
+    );
     let force = request.force;
+    let requested_scope = request.scope.clone().unwrap_or_else(|| "all".to_owned());
     let core_request = match build_rebuild_request(request) {
         Ok(request) => request,
         Err(message) => {
+            warn!(
+                event = "rebuild.request.invalid_input",
+                reason = %message,
+                "rebuild request validation failed"
+            );
             return api::error::<AdminRebuildResponseData>(
                 StatusCode::BAD_REQUEST,
                 "INVALID_INPUT",
@@ -42,8 +61,23 @@ pub async fn post_rebuild(
 
     let job = match state.rebuild(core_request, force) {
         Ok(job) => job,
-        Err(error) => return map_rebuild_error(error),
+        Err(error) => {
+            warn!(
+                event = "rebuild.request.failed",
+                error = %error,
+                "rebuild request failed"
+            );
+            return map_rebuild_error(error);
+        }
     };
+    info!(
+        event = "rebuild.request.succeeded",
+        job_id = job.id,
+        status = %job.status,
+        scope = %requested_scope,
+        force = force,
+        "rebuild request completed"
+    );
 
     api::success(AdminRebuildResponseData {
         job_id: format_job_id(job.id),
@@ -118,14 +152,14 @@ fn map_rebuild_error(error: AppStateError) -> RebuildResponse {
             message,
             false,
         ),
-        AppStateError::Ingest(_)
-        | AppStateError::Forget(_)
-        | AppStateError::Recall(_) => api::error::<AdminRebuildResponseData>(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "STORAGE_ERROR",
-            "unexpected pipeline error in rebuild handler",
-            false,
-        ),
+        AppStateError::Ingest(_) | AppStateError::Forget(_) | AppStateError::Recall(_) => {
+            api::error::<AdminRebuildResponseData>(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "STORAGE_ERROR",
+                "unexpected pipeline error in rebuild handler",
+                false,
+            )
+        }
     }
 }
 

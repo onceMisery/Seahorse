@@ -2,14 +2,12 @@ use axum::extract::{rejection::JsonRejection, State};
 use axum::http::StatusCode;
 use axum::Json;
 use seahorse_core::{ForgetError, ForgetMode, ForgetRequest as CoreForgetRequest};
+use tracing::{info, warn};
 
 use crate::api::{self, ForgetRequest, ForgetResponseData};
 use crate::state::{AppState, AppStateError};
 
-type ForgetResponse = (
-    StatusCode,
-    Json<api::ResponseEnvelope<ForgetResponseData>>,
-);
+type ForgetResponse = (StatusCode, Json<api::ResponseEnvelope<ForgetResponseData>>);
 
 pub async fn post_forget(
     State(state): State<AppState>,
@@ -18,6 +16,11 @@ pub async fn post_forget(
     let Json(request) = match payload {
         Ok(json) => json,
         Err(error) => {
+            warn!(
+                event = "forget.request.invalid_json",
+                error = %error,
+                "forget request rejected"
+            );
             return api::error::<ForgetResponseData>(
                 StatusCode::BAD_REQUEST,
                 "INVALID_INPUT",
@@ -26,10 +29,23 @@ pub async fn post_forget(
             );
         }
     };
+    info!(
+        event = "forget.request.received",
+        namespace = %request.namespace,
+        chunk_count = request.chunk_ids.len(),
+        has_file_id = request.file_id.is_some(),
+        mode = %request.mode.as_deref().unwrap_or("soft"),
+        "forget request received"
+    );
 
     let core_request = match build_forget_request(request) {
         Ok(request) => request,
         Err(message) => {
+            warn!(
+                event = "forget.request.invalid_input",
+                reason = %message,
+                "forget request validation failed"
+            );
             return api::error::<ForgetResponseData>(
                 StatusCode::BAD_REQUEST,
                 "INVALID_INPUT",
@@ -41,8 +57,21 @@ pub async fn post_forget(
 
     let result = match state.forget(core_request) {
         Ok(result) => result,
-        Err(error) => return map_forget_error(error),
+        Err(error) => {
+            warn!(
+                event = "forget.request.failed",
+                error = %error,
+                "forget pipeline failed"
+            );
+            return map_forget_error(error);
+        }
     };
+    info!(
+        event = "forget.request.succeeded",
+        affected_chunks = result.affected_chunks,
+        index_cleanup_status = %result.index_cleanup_status,
+        "forget request completed"
+    );
 
     api::success(ForgetResponseData {
         affected_chunks: result.affected_chunks,
@@ -127,12 +156,9 @@ fn map_forget_error(error: AppStateError) -> ForgetResponse {
             source.to_string(),
             false,
         ),
-        AppStateError::NotFound { message } => api::error::<ForgetResponseData>(
-            StatusCode::NOT_FOUND,
-            "INVALID_INPUT",
-            message,
-            false,
-        ),
+        AppStateError::NotFound { message } => {
+            api::error::<ForgetResponseData>(StatusCode::NOT_FOUND, "INVALID_INPUT", message, false)
+        }
         AppStateError::Ingest(_) | AppStateError::Recall(_) | AppStateError::Rebuild(_) => {
             api::error::<ForgetResponseData>(
                 StatusCode::INTERNAL_SERVER_ERROR,

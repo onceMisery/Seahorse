@@ -152,8 +152,9 @@ pub fn load_observability_config() -> ObservabilityConfig {
         .unwrap_or_else(|error| panic!("{error}"))
 }
 
-fn parse_server_config(content: &str) -> Result<ServerConfig, toml::de::Error> {
-    let parsed: SeahorseConfigFile = toml::from_str(content)?;
+fn parse_server_config(content: &str) -> Result<ServerConfig, String> {
+    let parsed: SeahorseConfigFile = toml::from_str(content).map_err(|error| error.to_string())?;
+    reject_unsupported_config(&parsed)?;
     let mut config = ServerConfig::default();
 
     if let Some(storage) = parsed.storage {
@@ -201,6 +202,119 @@ fn parse_server_config(content: &str) -> Result<ServerConfig, toml::de::Error> {
     Ok(config)
 }
 
+fn reject_unsupported_config(parsed: &SeahorseConfigFile) -> Result<(), String> {
+    if let Some(storage) = &parsed.storage {
+        reject_if_present(
+            "storage.migrations_dir",
+            storage.migrations_dir.as_ref().map(|_| ()),
+        )?;
+        reject_if_present("storage.namespace", storage.namespace.as_ref().map(|_| ()))?;
+        reject_if_present("storage.enable_wal", storage.enable_wal.map(|_| ()))?;
+        reject_if_present(
+            "storage.busy_timeout_ms",
+            storage.busy_timeout_ms.map(|_| ()),
+        )?;
+    }
+
+    if let Some(api) = &parsed.api {
+        reject_if_present("api.request_timeout_ms", api.request_timeout_ms.map(|_| ()))?;
+        reject_if_present(
+            "api.expose_admin_endpoints",
+            api.expose_admin_endpoints.map(|_| ()),
+        )?;
+    }
+
+    if let Some(embedding) = &parsed.embedding {
+        reject_if_present(
+            "embedding.provider",
+            embedding.provider.as_ref().map(|_| ()),
+        )?;
+        reject_if_present(
+            "embedding.model_id",
+            embedding.model_id.as_ref().map(|_| ()),
+        )?;
+        reject_if_present("embedding.timeout_ms", embedding.timeout_ms.map(|_| ()))?;
+        reject_if_present(
+            "embedding.max_batch_size",
+            embedding.max_batch_size.map(|_| ()),
+        )?;
+    }
+
+    reject_section("index", parsed.index.as_ref().map(section_has_index_values))?;
+    reject_section(
+        "pipeline",
+        parsed.pipeline.as_ref().map(section_has_pipeline_values),
+    )?;
+
+    if let Some(observability) = &parsed.observability {
+        reject_if_present(
+            "observability.health_path",
+            observability.health_path.as_ref().map(|_| ()),
+        )?;
+    }
+
+    if let Some(jobs) = &parsed.jobs {
+        reject_if_present(
+            "jobs.rebuild_max_concurrency",
+            jobs.rebuild_max_concurrency.map(|_| ()),
+        )?;
+        reject_if_present(
+            "jobs.rebuild_batch_size",
+            jobs.rebuild_batch_size.map(|_| ()),
+        )?;
+    }
+
+    reject_section(
+        "runtime",
+        parsed.runtime.as_ref().map(section_has_runtime_values),
+    )?;
+
+    Ok(())
+}
+
+fn reject_if_present(name: &str, present: Option<()>) -> Result<(), String> {
+    if present.is_some() {
+        return Err(format!(
+            "unsupported config field {name}; this build only supports fields wired in docs/mvp-config.example.toml"
+        ));
+    }
+
+    Ok(())
+}
+
+fn reject_section(name: &str, has_values: Option<bool>) -> Result<(), String> {
+    if has_values.unwrap_or(false) {
+        return Err(format!(
+            "unsupported config section {name}; this build only supports fields wired in docs/mvp-config.example.toml"
+        ));
+    }
+
+    Ok(())
+}
+
+fn section_has_index_values(section: &RawIndexConfig) -> bool {
+    section.provider.is_some()
+        || section.ef_search.is_some()
+        || section.ef_construction.is_some()
+        || section.m.is_some()
+        || section.enable_visibility_filter.is_some()
+}
+
+fn section_has_pipeline_values(section: &RawPipelineConfig) -> bool {
+    section.default_top_k.is_some()
+        || section.max_top_k.is_some()
+        || section.max_content_bytes.is_some()
+        || section.max_tag_count.is_some()
+        || section.max_tag_length.is_some()
+        || section.max_metadata_bytes.is_some()
+        || section.default_chunk_mode.is_some()
+        || section.default_dedup_mode.is_some()
+}
+
+fn section_has_runtime_values(section: &RawRuntimeConfig) -> bool {
+    section.environment.is_some() || section.allow_public_bind.is_some()
+}
+
 fn apply_legacy_env_overrides(mut config: ServerConfig) -> Result<ServerConfig, String> {
     if let Ok(db_path) = std::env::var("SEAHORSE_DB_PATH") {
         config.storage.db_path = db_path;
@@ -231,9 +345,9 @@ fn parse_legacy_server_addr(addr: &str) -> Result<(String, u16), String> {
         return Ok((host.to_owned(), parse_legacy_port(trimmed, port)?));
     }
 
-    let (host, port) = trimmed.rsplit_once(':').ok_or_else(|| {
-        format!("SEAHORSE_SERVER_ADDR must use host:port format, got {trimmed}")
-    })?;
+    let (host, port) = trimmed
+        .rsplit_once(':')
+        .ok_or_else(|| format!("SEAHORSE_SERVER_ADDR must use host:port format, got {trimmed}"))?;
     if host.is_empty() {
         return Err(format!(
             "SEAHORSE_SERVER_ADDR must include a host before the port, got {trimmed}"

@@ -6,8 +6,8 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt as _;
-use serde_json::{json, Map, Value};
 use seahorse_server::app::build_test_app;
+use serde_json::{json, Map, Value};
 use tower::util::ServiceExt;
 
 const JOB_POLL_ATTEMPTS: usize = 500;
@@ -48,7 +48,10 @@ async fn json_endpoints_match_formal_response_envelope_contract() {
         .iter()
         .map(|value| value.as_i64().expect("chunk_id should be integer"))
         .collect::<Vec<_>>();
-    assert!(!chunk_ids.is_empty(), "ingest should create at least one chunk");
+    assert!(
+        !chunk_ids.is_empty(),
+        "ingest should create at least one chunk"
+    );
     assert!(ingest_body["data"]["file_id"].is_i64());
     assert_string_enum(
         &ingest_body["data"]["ingest_status"],
@@ -135,7 +138,10 @@ async fn json_endpoints_match_formal_response_envelope_contract() {
         .as_str()
         .expect("rebuild job_id should be string")
         .to_owned();
-    assert_eq!(rebuild_body["data"]["status"], Value::String("queued".to_owned()));
+    assert_eq!(
+        rebuild_body["data"]["status"],
+        Value::String("queued".to_owned())
+    );
     assert!(rebuild_body["data"]["submitted_at"].is_string());
 
     let job_body = poll_job_until_terminal(&app, &job_id).await;
@@ -149,7 +155,6 @@ async fn json_endpoints_match_formal_response_envelope_contract() {
         job_body["data"]["status"],
         Value::String("succeeded".to_owned())
     );
-
 }
 
 #[tokio::test]
@@ -182,6 +187,23 @@ async fn json_error_responses_match_formal_response_envelope_contract() {
         "mode must be basic; got semantic",
     )
     .await;
+
+    let (status, body) = json_request_with_status(
+        &app,
+        Method::POST,
+        "/recall",
+        Some(json!({
+            "namespace": "default",
+            "query": "contract alpha",
+            "mode": "basic",
+            "timeout_ms": 0
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    assert_error_envelope(&body);
+    assert_eq!(body["error"]["code"], Value::String("TIMEOUT".to_owned()));
+    assert_eq!(body["error"]["retryable"], Value::Bool(true));
 
     assert_invalid_input_error(
         &app,
@@ -219,7 +241,6 @@ async fn json_error_responses_match_formal_response_envelope_contract() {
         "job_id must be a positive integer; got job-0",
     )
     .await;
-
 }
 
 #[tokio::test]
@@ -244,7 +265,6 @@ async fn metrics_endpoint_matches_formal_text_contract() {
     assert!(body.contains("seahorse_http_requests_total{scope=\"total\"}"));
     assert!(body.contains("seahorse_chunk_count "));
     assert!(body.contains("seahorse_health_status{status=\"ok\"} 1"));
-
 }
 
 async fn json_request(app: &Router, method: Method, uri: &str, body: Option<Value>) -> Value {
@@ -296,13 +316,7 @@ async fn raw_request(
 async fn poll_job_until_terminal(app: &Router, job_id: &str) -> Value {
     let mut last_status = String::new();
     for _ in 0..JOB_POLL_ATTEMPTS {
-        let body = json_request(
-            app,
-            Method::GET,
-            &format!("/admin/jobs/{job_id}"),
-            None,
-        )
-        .await;
+        let body = json_request(app, Method::GET, &format!("/admin/jobs/{job_id}"), None).await;
 
         let status = body["data"]["status"].as_str().unwrap_or_default();
         last_status = status.to_owned();

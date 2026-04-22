@@ -3,7 +3,9 @@ use std::fmt;
 #[derive(Debug)]
 pub enum StorageError {
     Sqlite(rusqlite::Error),
-    MissingSchemaMeta { key: &'static str },
+    MissingSchemaMeta {
+        key: &'static str,
+    },
     InvalidSchemaMeta {
         key: &'static str,
         expected: String,

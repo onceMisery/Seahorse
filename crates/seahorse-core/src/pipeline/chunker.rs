@@ -76,7 +76,10 @@ mod tests {
     fn chunks_are_ordered_and_stable() {
         let config = ChunkerConfig { max_chars: 3 };
         let result = chunk_text("abcdef", config);
-        let hashes: Vec<_> = result.iter().map(|chunk| chunk.content_hash.clone()).collect();
+        let hashes: Vec<_> = result
+            .iter()
+            .map(|chunk| chunk.content_hash.clone())
+            .collect();
         assert_eq!(hashes, hashes.clone());
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].text, "abc");

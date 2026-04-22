@@ -122,7 +122,8 @@ where
         validate_request(&request)?;
 
         let deletion = if let Some(file_id) = request.file_id {
-            self.repository.soft_delete_files(&request.namespace, &[file_id])?
+            self.repository
+                .soft_delete_files(&request.namespace, &[file_id])?
         } else {
             self.repository
                 .soft_delete_chunks(&request.namespace, &dedup_chunk_ids(&request.chunk_ids))?
@@ -162,8 +163,14 @@ where
                 let repair_task_id = self.repository.enqueue_repair_task(
                     &request.namespace,
                     "index_delete",
-                    if request.file_id.is_some() { "file" } else { "chunk" },
-                    request.file_id.or_else(|| deletion.deleted_chunk_ids.first().copied()),
+                    if request.file_id.is_some() {
+                        "file"
+                    } else {
+                        "chunk"
+                    },
+                    request
+                        .file_id
+                        .or_else(|| deletion.deleted_chunk_ids.first().copied()),
                     Some(&repair_payload),
                 )?;
 
@@ -258,7 +265,10 @@ mod tests {
 
     use super::{ForgetMode, ForgetPipeline, ForgetRequest};
     use crate::embedding::StubEmbeddingProvider;
-    use crate::index::{IndexEntry, IndexError, IndexResult, InMemoryVectorIndex, SearchHit, SearchRequest, VectorIndex};
+    use crate::index::{
+        InMemoryVectorIndex, IndexEntry, IndexError, IndexResult, SearchHit, SearchRequest,
+        VectorIndex,
+    };
     use crate::pipeline::{IngestPipeline, IngestRequest, RecallPipeline, RecallRequest};
     use crate::storage::{apply_sqlite_migrations, SqliteRepository};
 
@@ -301,10 +311,9 @@ mod tests {
 
         let mut request = IngestRequest::new("alpha beta gamma delta epsilon");
         request.options.chunk_size = 5;
-        let mut ingest_pipeline = IngestPipeline::new(&mut repository, &provider, &mut ingest_index);
-        let ingest = ingest_pipeline
-            .ingest(request)
-            .expect("ingest");
+        let mut ingest_pipeline =
+            IngestPipeline::new(&mut repository, &provider, &mut ingest_index);
+        let ingest = ingest_pipeline.ingest(request).expect("ingest");
 
         let target_chunk_id = ingest.chunk_ids[0];
         let mut forget_pipeline = ForgetPipeline::new(&mut repository, &mut ingest_index);
@@ -326,7 +335,8 @@ mod tests {
         let mut repository = repository_with_schema();
         let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
         let mut ingest_index = InMemoryVectorIndex::new(4);
-        let mut ingest_pipeline = IngestPipeline::new(&mut repository, &provider, &mut ingest_index);
+        let mut ingest_pipeline =
+            IngestPipeline::new(&mut repository, &provider, &mut ingest_index);
         let ingest = ingest_pipeline
             .ingest(IngestRequest::new("forget me later"))
             .expect("ingest");

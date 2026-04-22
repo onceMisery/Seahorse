@@ -1,6 +1,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use tracing::{info, warn};
 
 use crate::api::{self, AdminJobResponseData};
 use crate::state::{AppState, AppStateError};
@@ -14,9 +15,19 @@ pub async fn get_job(
     State(state): State<AppState>,
     Path(job_id): Path<String>,
 ) -> impl axum::response::IntoResponse {
+    info!(
+        event = "job.query.received",
+        job_id = %job_id,
+        "maintenance job query received"
+    );
     let job_id = match parse_job_id(&job_id) {
         Ok(job_id) => job_id,
         Err(message) => {
+            warn!(
+                event = "job.query.invalid_input",
+                reason = %message,
+                "maintenance job query rejected"
+            );
             return api::error::<AdminJobResponseData>(
                 StatusCode::BAD_REQUEST,
                 "INVALID_INPUT",
@@ -28,8 +39,24 @@ pub async fn get_job(
 
     let job = match state.get_job(job_id) {
         Ok(job) => job,
-        Err(error) => return map_job_error(error),
+        Err(error) => {
+            warn!(
+                event = "job.query.failed",
+                job_id = job_id,
+                error = %error,
+                "maintenance job query failed"
+            );
+            return map_job_error(error);
+        }
     };
+    info!(
+        event = "job.query.succeeded",
+        job_id = job.id,
+        job_type = %job.job_type,
+        status = %job.status,
+        has_error_message = job.error_message.is_some(),
+        "maintenance job query completed"
+    );
 
     api::success(AdminJobResponseData {
         job_id: format_job_id(job.id),

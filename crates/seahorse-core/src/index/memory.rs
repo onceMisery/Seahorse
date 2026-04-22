@@ -66,7 +66,9 @@ impl VectorIndex for InMemoryVectorIndex {
         self.validate_vector(&request.query_vector)?;
 
         if request.top_k == 0 {
-            return Err(IndexError::InvalidTopK { top_k: request.top_k });
+            return Err(IndexError::InvalidTopK {
+                top_k: request.top_k,
+            });
         }
 
         let mut hits = self
@@ -177,9 +179,7 @@ mod tests {
             ])
             .expect("insert entries");
 
-        let affected = index
-            .mark_deleted("default", &[10])
-            .expect("mark deleted");
+        let affected = index.mark_deleted("default", &[10]).expect("mark deleted");
         assert_eq!(affected, 1);
 
         let hits = index

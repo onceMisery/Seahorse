@@ -63,6 +63,7 @@ pub struct RecallResult {
 #[derive(Debug)]
 pub enum RecallError {
     InvalidInput { message: String },
+    Timeout { timeout_ms: u64, elapsed_ms: u64 },
     Embedding(EmbeddingError),
     Storage(StorageError),
     Index(IndexError),
@@ -72,6 +73,13 @@ impl fmt::Display for RecallError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidInput { message } => write!(f, "invalid recall input: {message}"),
+            Self::Timeout {
+                timeout_ms,
+                elapsed_ms,
+            } => write!(
+                f,
+                "recall timed out: timeout_ms={timeout_ms}, elapsed_ms={elapsed_ms}"
+            ),
             Self::Embedding(source) => write!(f, "recall embedding failed: {source}"),
             Self::Storage(source) => write!(f, "recall storage failed: {source}"),
             Self::Index(source) => write!(f, "recall index failed: {source}"),
@@ -85,7 +93,7 @@ impl std::error::Error for RecallError {
             Self::Embedding(source) => Some(source),
             Self::Storage(source) => Some(source),
             Self::Index(source) => Some(source),
-            Self::InvalidInput { .. } => None,
+            Self::InvalidInput { .. } | Self::Timeout { .. } => None,
         }
     }
 }
@@ -139,8 +147,10 @@ where
         validate_request(&request)?;
 
         let started_at = Instant::now();
+        ensure_not_timed_out(started_at, request.timeout_ms)?;
         let query_text = request.query.trim();
         let query_embedding = self.embedding_provider.embed(query_text)?;
+        ensure_not_timed_out(started_at, request.timeout_ms)?;
         if query_embedding.len() != self.embedding_provider.dimension() {
             return Err(RecallError::Embedding(EmbeddingError::DimensionMismatch {
                 expected: self.embedding_provider.dimension(),
@@ -153,12 +163,14 @@ where
             query_embedding,
             request.top_k,
         ))?;
+        ensure_not_timed_out(started_at, request.timeout_ms)?;
 
         let mut seen = HashSet::new();
         let normalized_filter_tags = normalize_filter_tags(&request.filters.tags);
         let mut results = Vec::new();
 
         for hit in hits {
+            ensure_not_timed_out(started_at, request.timeout_ms)?;
             let Some(record) = self.repository.get_chunk_record(hit.chunk_id)? else {
                 continue;
             };
@@ -220,6 +232,22 @@ fn validate_request(request: &RecallRequest) -> Result<(), RecallError> {
     if request.top_k == 0 || request.top_k > 20 {
         return Err(RecallError::InvalidInput {
             message: "top_k must be between 1 and 20".to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
+fn ensure_not_timed_out(started_at: Instant, timeout_ms: Option<u64>) -> Result<(), RecallError> {
+    let Some(timeout_ms) = timeout_ms else {
+        return Ok(());
+    };
+
+    let elapsed_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    if elapsed_ms >= timeout_ms {
+        return Err(RecallError::Timeout {
+            timeout_ms,
+            elapsed_ms,
         });
     }
 
@@ -306,7 +334,10 @@ mod tests {
         assert_eq!(result.results.len(), 1);
         assert_eq!(result.results[0].source_file, "alpha.txt");
         assert_eq!(result.results[0].source_type, "Vector");
-        assert_eq!(result.results[0].tags, vec!["project".to_owned(), "rust".to_owned()]);
+        assert_eq!(
+            result.results[0].tags,
+            vec!["project".to_owned(), "rust".to_owned()]
+        );
         assert_eq!(
             result.results[0].metadata_json.as_deref(),
             Some("{\"kind\":\"alpha\"}")
@@ -410,6 +441,25 @@ mod tests {
             .expect_err("invalid request should fail");
 
         assert!(error.to_string().contains("query must not be empty"));
+    }
+
+    #[test]
+    fn times_out_when_timeout_budget_is_exhausted() {
+        let repository = repository_with_schema();
+        let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
+        let recall_index = StaticHitIndex::new(4, Vec::new());
+
+        let mut request = RecallRequest::new("alpha");
+        request.timeout_ms = Some(0);
+
+        let error = RecallPipeline::new(&repository, &provider, &recall_index)
+            .recall(request)
+            .expect_err("timeout budget should fail recall");
+
+        match error {
+            super::RecallError::Timeout { timeout_ms, .. } => assert_eq!(timeout_ms, 0),
+            other => panic!("unexpected error: {other}"),
+        }
     }
 
     #[derive(Debug)]

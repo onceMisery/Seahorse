@@ -135,7 +135,8 @@ where
                 }
                 Err(message) => {
                     let deadletter = (task.retry_count + 1) >= i64::from(self.config.max_retries);
-                    self.repository.fail_repair_task(task.id, &message, deadletter)?;
+                    self.repository
+                        .fail_repair_task(task.id, &message, deadletter)?;
                     if deadletter {
                         result.deadlettered += 1;
                     } else {
@@ -153,7 +154,10 @@ fn validate_repair_task(task: &RepairTask) -> Result<(), String> {
     match task.task_type.as_str() {
         "index_insert" => {
             validate_target_type(task, &["file"])?;
-            validate_payload_keys(task, &["file_id", "chunk_ids", "model_id", "dimension", "error"])
+            validate_payload_keys(
+                task,
+                &["file_id", "chunk_ids", "model_id", "dimension", "error"],
+            )
         }
         "index_delete" => {
             validate_target_type(task, &["file", "chunk"])?;

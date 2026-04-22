@@ -8,7 +8,7 @@ use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::Response;
 use tokio::task_local;
-use tracing::info;
+use tracing::{error, info, info_span, warn, Instrument};
 
 task_local! {
     static REQUEST_ID: String;
@@ -53,7 +53,7 @@ pub struct RouteRequestMetricsSnapshot {
 }
 
 #[derive(Debug, Clone)]
-pub struct RequestId(pub String);
+pub struct RequestId;
 
 pub fn current_request_id() -> Option<String> {
     REQUEST_ID.try_with(Clone::clone).ok()
@@ -93,9 +93,7 @@ pub fn request_metrics_snapshot() -> RequestMetricsSnapshot {
 
 pub async fn request_context_middleware(mut request: Request, next: Next) -> Response {
     let request_id = next_request_id();
-    request
-        .extensions_mut()
-        .insert(RequestId(request_id.clone()));
+    request.extensions_mut().insert(RequestId);
     let method = request.method().to_string();
     let path = request.uri().path().to_owned();
     let route = request
@@ -104,25 +102,51 @@ pub async fn request_context_middleware(mut request: Request, next: Next) -> Res
         .map(|matched| matched.as_str().to_owned())
         .unwrap_or_else(|| path.clone());
     let started = Instant::now();
+    let request_span = info_span!(
+        "http.request",
+        request_id = %request_id,
+        method = %method,
+        route = %route,
+        path = %path,
+    );
 
     REQUEST_ID
-        .scope(request_id.clone(), async move {
-            let response = next.run(request).await;
-            let status = response.status().as_u16();
-            let latency_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-            record_request_metrics(&method, &route, status, latency_ms);
+        .scope(
+            request_id.clone(),
+            async move {
+                info!(event = "request.start", "http request started");
+                let response = next.run(request).await;
+                let status = response.status().as_u16();
+                let latency_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+                record_request_metrics(&method, &route, status, latency_ms);
 
-            info!(
-                method = %method,
-                path = %path,
-                status = status,
-                request_id = %request_id,
-                latency_ms = latency_ms,
-                "request completed"
-            );
+                if status >= 500 {
+                    error!(
+                        event = "request.end",
+                        status = status,
+                        latency_ms = latency_ms,
+                        "http request completed with server error"
+                    );
+                } else if status >= 400 {
+                    warn!(
+                        event = "request.end",
+                        status = status,
+                        latency_ms = latency_ms,
+                        "http request completed with client error"
+                    );
+                } else {
+                    info!(
+                        event = "request.end",
+                        status = status,
+                        latency_ms = latency_ms,
+                        "http request completed"
+                    );
+                }
 
-            response
-        })
+                response
+            }
+            .instrument(request_span),
+        )
         .await
 }
 

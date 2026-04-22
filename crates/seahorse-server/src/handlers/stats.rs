@@ -5,10 +5,7 @@ use axum::Json;
 use crate::api::{self, StatsResponseData};
 use crate::state::{AppState, AppStateError};
 
-type StatsResponse = (
-    StatusCode,
-    Json<api::ResponseEnvelope<StatsResponseData>>,
-);
+type StatsResponse = (StatusCode, Json<api::ResponseEnvelope<StatsResponseData>>);
 
 pub async fn get_stats(State(state): State<AppState>) -> impl axum::response::IntoResponse {
     match state.stats_snapshot() {
@@ -37,12 +34,9 @@ fn map_stats_error(error: AppStateError) -> StatsResponse {
             source.to_string(),
             false,
         ),
-        AppStateError::NotFound { message } => api::error::<StatsResponseData>(
-            StatusCode::NOT_FOUND,
-            "INVALID_INPUT",
-            message,
-            false,
-        ),
+        AppStateError::NotFound { message } => {
+            api::error::<StatsResponseData>(StatusCode::NOT_FOUND, "INVALID_INPUT", message, false)
+        }
         AppStateError::Ingest(_)
         | AppStateError::Forget(_)
         | AppStateError::Recall(_)

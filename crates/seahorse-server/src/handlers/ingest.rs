@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::Json;
 use seahorse_core::{DedupMode, EmbeddingError, IngestError, IngestRequest as CoreIngestRequest};
 use serde_json::Value;
+use tracing::{info, warn};
 
 use crate::api::{self, IngestRequest, IngestResponseData};
 use crate::state::{AppState, AppStateError};
@@ -12,10 +13,7 @@ const MAX_FILENAME_LENGTH: usize = 255;
 const MAX_TAG_COUNT: usize = 32;
 const MAX_TAG_LENGTH: usize = 64;
 const MAX_METADATA_BYTES: usize = 16 * 1024;
-type IngestResponse = (
-    StatusCode,
-    Json<api::ResponseEnvelope<IngestResponseData>>,
-);
+type IngestResponse = (StatusCode, Json<api::ResponseEnvelope<IngestResponseData>>);
 
 pub async fn post_ingest(
     State(state): State<AppState>,
@@ -24,6 +22,11 @@ pub async fn post_ingest(
     let Json(request) = match payload {
         Ok(json) => json,
         Err(error) => {
+            warn!(
+                event = "ingest.request.invalid_json",
+                error = %error,
+                "ingest request rejected"
+            );
             return api::error::<IngestResponseData>(
                 StatusCode::BAD_REQUEST,
                 "INVALID_INPUT",
@@ -32,10 +35,24 @@ pub async fn post_ingest(
             );
         }
     };
+    info!(
+        event = "ingest.request.received",
+        namespace = %request.namespace,
+        content_bytes = request.content.len(),
+        tag_count = request.tags.len(),
+        has_source = request.source.is_some(),
+        has_metadata = request.metadata.is_some(),
+        "ingest request received"
+    );
 
     let core_request = match build_ingest_request(request) {
         Ok(request) => request,
         Err(message) => {
+            warn!(
+                event = "ingest.request.invalid_input",
+                reason = %message,
+                "ingest request validation failed"
+            );
             return api::error::<IngestResponseData>(
                 StatusCode::BAD_REQUEST,
                 "INVALID_INPUT",
@@ -47,8 +64,26 @@ pub async fn post_ingest(
 
     let result = match state.ingest(core_request) {
         Ok(result) => result,
-        Err(error) => return map_ingest_error(error),
+        Err(error) => {
+            warn!(
+                event = "ingest.request.failed",
+                error = %error,
+                "ingest pipeline failed"
+            );
+            return map_ingest_error(error);
+        }
     };
+    let chunk_count = result.chunk_ids.len();
+    let warning_count = result.warnings.len();
+    info!(
+        event = "ingest.request.succeeded",
+        file_id = result.file_id,
+        chunk_count = chunk_count,
+        ingest_status = %result.ingest_status,
+        index_status = %result.index_status,
+        warning_count = warning_count,
+        "ingest request completed"
+    );
 
     api::success(IngestResponseData {
         file_id: result.file_id,
@@ -94,6 +129,7 @@ fn build_ingest_request(request: IngestRequest) -> Result<CoreIngestRequest, Str
     core_request.source_type = source_type;
     core_request.tags = tags;
     core_request.metadata_json = metadata_json;
+    parse_chunk_mode(options.and_then(|value| value.chunk_mode.as_deref()))?;
     core_request.options.auto_tag = options.and_then(|value| value.auto_tag).unwrap_or(false);
     core_request.options.dedup_mode =
         parse_dedup_mode(options.and_then(|value| value.dedup_mode.as_deref()))?;
@@ -172,6 +208,15 @@ fn parse_dedup_mode(value: Option<&str>) -> Result<DedupMode, String> {
     }
 }
 
+fn parse_chunk_mode(value: Option<&str>) -> Result<(), String> {
+    match value.unwrap_or("fixed") {
+        "fixed" => Ok(()),
+        other => Err(format!(
+            "options.chunk_mode must be fixed in current build; got {other}"
+        )),
+    }
+}
+
 fn map_ingest_error(error: AppStateError) -> IngestResponse {
     match error {
         AppStateError::Unavailable { message } => api::error::<IngestResponseData>(
@@ -190,7 +235,10 @@ fn map_ingest_error(error: AppStateError) -> IngestResponse {
             IngestError::UnsupportedDedupMode { mode, reason } => api::error::<IngestResponseData>(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "STORAGE_ERROR",
-                format!("dedup_mode {} is not available in current build: {reason}", mode.as_str()),
+                format!(
+                    "dedup_mode {} is not available in current build: {reason}",
+                    mode.as_str()
+                ),
                 false,
             ),
             IngestError::Embedding(source) => map_embedding_error(source),
@@ -213,12 +261,9 @@ fn map_ingest_error(error: AppStateError) -> IngestResponse {
             source.to_string(),
             false,
         ),
-        AppStateError::NotFound { message } => api::error::<IngestResponseData>(
-            StatusCode::NOT_FOUND,
-            "INVALID_INPUT",
-            message,
-            false,
-        ),
+        AppStateError::NotFound { message } => {
+            api::error::<IngestResponseData>(StatusCode::NOT_FOUND, "INVALID_INPUT", message, false)
+        }
         AppStateError::Recall(_) | AppStateError::Forget(_) | AppStateError::Rebuild(_) => {
             api::error::<IngestResponseData>(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -246,5 +291,19 @@ fn map_embedding_error(error: EmbeddingError) -> IngestResponse {
                 true,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_chunk_mode;
+
+    #[test]
+    fn rejects_non_fixed_chunk_mode_at_http_boundary() {
+        let error = parse_chunk_mode(Some("semantic")).expect_err("chunk_mode should be rejected");
+        assert_eq!(
+            error,
+            "options.chunk_mode must be fixed in current build; got semantic"
+        );
     }
 }

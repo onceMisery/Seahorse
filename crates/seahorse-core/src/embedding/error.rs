@@ -27,10 +27,16 @@ impl fmt::Display for EmbeddingError {
                 "embedding provider timed out: provider={provider}, timeout_ms={timeout_ms}"
             ),
             Self::ProviderFailure { provider, message } => {
-                write!(f, "embedding provider failed: provider={provider}, message={message}")
+                write!(
+                    f,
+                    "embedding provider failed: provider={provider}, message={message}"
+                )
             }
             Self::DimensionMismatch { expected, actual } => {
-                write!(f, "embedding dimension mismatch: expected={expected}, actual={actual}")
+                write!(
+                    f,
+                    "embedding dimension mismatch: expected={expected}, actual={actual}"
+                )
             }
         }
     }

@@ -1,16 +1,16 @@
-use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::embedding::{EmbeddingError, EmbeddingProvider};
 use crate::index::{IndexEntry, IndexError, VectorIndex};
 use crate::storage::{
-    ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedFile,
-    PersistedReplacement, SqliteRepository, StorageError, TagWrite,
+    ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedFile, PersistedReplacement,
+    SqliteRepository, StorageError,
 };
 
 use super::chunker::{chunk_text, ChunkerConfig};
 use super::hashing::stable_content_hash;
 use super::preprocessor::normalize_text;
+use super::tagging::{resolve_tags, ResolvedTag};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DedupMode {
@@ -77,7 +77,9 @@ pub struct IngestResult {
 
 #[derive(Debug)]
 pub enum IngestError {
-    InvalidInput { message: String },
+    InvalidInput {
+        message: String,
+    },
     UnsupportedDedupMode {
         mode: DedupMode,
         reason: &'static str,
@@ -222,8 +224,19 @@ where
             }
         }
 
-        let tags = normalize_tags(&request.namespace, &request.tags);
-        let batch = build_write_batch(&request, &file_hash, &chunks, &tags, self.embedding_provider);
+        let tags = resolve_tags(
+            &request.tags,
+            trimmed_content,
+            request.source_uri.as_deref(),
+            request.options.auto_tag,
+        );
+        let batch = build_write_batch(
+            &request,
+            &file_hash,
+            &chunks,
+            &tags,
+            self.embedding_provider,
+        );
         let mut warnings = build_ingest_warnings(&request.options);
         if matches!(request.options.dedup_mode, DedupMode::Allow) && !existing_files.is_empty() {
             warnings.push(format!(
@@ -235,14 +248,18 @@ where
         let PersistedReplacement {
             ingest: persisted,
             deleted_chunk_ids,
-        } = if matches!(request.options.dedup_mode, DedupMode::Upsert) && !existing_files.is_empty() {
+        } = if matches!(request.options.dedup_mode, DedupMode::Upsert) && !existing_files.is_empty()
+        {
             warnings.push(format!(
                 "upsert replaced {} active file(s) sharing the same file_hash",
                 existing_files.len()
             ));
             self.repository.replace_ingest_batch(
                 &request.namespace,
-                &existing_files.iter().map(|file| file.id).collect::<Vec<_>>(),
+                &existing_files
+                    .iter()
+                    .map(|file| file.id)
+                    .collect::<Vec<_>>(),
                 &batch,
             )?
         } else {
@@ -280,8 +297,12 @@ where
 
         match self.vector_index.insert(&index_entries) {
             Ok(()) => {
-                self.repository
-                    .update_indexing_result(persisted.file.id, &chunk_ids, "ready", "ready")?;
+                self.repository.update_indexing_result(
+                    persisted.file.id,
+                    &chunk_ids,
+                    "ready",
+                    "ready",
+                )?;
 
                 Ok(IngestResult {
                     file_id: persisted.file.id,
@@ -317,7 +338,9 @@ where
                     Some(&repair_payload),
                 )?;
 
-                warnings.push(format!("index update failed and was queued for repair: {index_error}"));
+                warnings.push(format!(
+                    "index update failed and was queued for repair: {index_error}"
+                ));
                 if let Some(cleanup_repair_task_id) = cleanup_repair_task_id {
                     warnings.push(format!(
                         "previous version index cleanup is also queued for repair: repair_task_id={cleanup_repair_task_id}"
@@ -378,7 +401,10 @@ where
             Err(index_error) => {
                 let repair_payload = build_delete_repair_payload(
                     file_hash,
-                    &existing_files.iter().map(|file| file.id).collect::<Vec<_>>(),
+                    &existing_files
+                        .iter()
+                        .map(|file| file.id)
+                        .collect::<Vec<_>>(),
                     deleted_chunk_ids,
                     &index_error,
                 );
@@ -418,7 +444,7 @@ fn build_write_batch<P: EmbeddingProvider + ?Sized>(
     request: &IngestRequest,
     file_hash: &str,
     chunks: &[super::chunker::Chunk],
-    tags: &[TagWrite],
+    tags: &[ResolvedTag],
     embedding_provider: &P,
 ) -> IngestWriteBatch {
     let mut file = FileWrite::new(&request.filename, file_hash);
@@ -448,7 +474,7 @@ fn build_write_batch<P: EmbeddingProvider + ?Sized>(
         .flat_map(|chunk| {
             tags.iter().map(move |tag| {
                 let mut link = ChunkTagInsert::new(chunk.index as i64, &tag.normalized_name);
-                link.source = "explicit".to_owned();
+                link.source = tag.source.to_owned();
                 link
             })
         })
@@ -457,32 +483,12 @@ fn build_write_batch<P: EmbeddingProvider + ?Sized>(
     IngestWriteBatch {
         file,
         chunks: chunk_writes,
-        tags: tags.to_vec(),
+        tags: tags
+            .iter()
+            .map(|tag| tag.to_tag_write(&request.namespace))
+            .collect(),
         chunk_tags,
     }
-}
-
-fn normalize_tags(namespace: &str, tags: &[String]) -> Vec<TagWrite> {
-    let mut normalized = BTreeMap::<String, String>::new();
-
-    for tag in tags {
-        let trimmed = tag.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let key = trimmed.to_ascii_lowercase();
-        normalized.entry(key).or_insert_with(|| trimmed.to_owned());
-    }
-
-    normalized
-        .into_iter()
-        .map(|(normalized_name, name)| {
-            let mut tag = TagWrite::new(name, normalized_name);
-            tag.namespace = namespace.to_owned();
-            tag
-        })
-        .collect()
 }
 
 fn summarize_index_status(chunks: &[crate::storage::PersistedChunk]) -> &'static str {
@@ -493,12 +499,8 @@ fn summarize_index_status(chunks: &[crate::storage::PersistedChunk]) -> &'static
     }
 }
 
-fn build_ingest_warnings(options: &IngestOptions) -> Vec<String> {
-    let mut warnings = Vec::new();
-    if options.auto_tag {
-        warnings.push("auto_tag is not implemented yet; only explicit tags were used".to_owned());
-    }
-    warnings
+fn build_ingest_warnings(_options: &IngestOptions) -> Vec<String> {
+    Vec::new()
 }
 
 fn build_repair_payload(
@@ -575,7 +577,9 @@ mod tests {
 
     use super::{DedupMode, IngestPipeline, IngestRequest};
     use crate::embedding::{EmbeddingProvider, StubEmbeddingProvider};
-    use crate::index::{IndexEntry, IndexError, IndexResult, InMemoryVectorIndex, SearchRequest, VectorIndex};
+    use crate::index::{
+        InMemoryVectorIndex, IndexEntry, IndexError, IndexResult, SearchRequest, VectorIndex,
+    };
     use crate::storage::{apply_sqlite_migrations, SqliteRepository};
 
     fn repository_with_schema() -> SqliteRepository {
@@ -600,7 +604,11 @@ mod tests {
         assert!(!result.chunk_ids.is_empty());
 
         let hits = index
-            .search(&SearchRequest::new("default", provider.embed("alpha beta").expect("embedding"), 5))
+            .search(&SearchRequest::new(
+                "default",
+                provider.embed("alpha beta").expect("embedding"),
+                5,
+            ))
             .expect("search");
         assert!(!hits.is_empty());
     }
@@ -699,7 +707,9 @@ mod tests {
         request.options.dedup_mode = DedupMode::Upsert;
 
         let mut second_pipeline = IngestPipeline::new(&mut repository, &provider, &mut index);
-        let second = second_pipeline.ingest(request).expect("upsert should replace duplicate");
+        let second = second_pipeline
+            .ingest(request)
+            .expect("upsert should replace duplicate");
 
         let active_files = repository
             .list_active_files_by_hash("default", &first.file_hash)

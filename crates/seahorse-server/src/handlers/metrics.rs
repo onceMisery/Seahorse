@@ -13,7 +13,10 @@ pub async fn get_metrics(State(state): State<AppState>) -> impl IntoResponse {
     match render_metrics(&state) {
         Ok(body) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, HeaderValue::from_static(PROMETHEUS_CONTENT_TYPE))],
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(PROMETHEUS_CONTENT_TYPE),
+            )],
             body,
         )
             .into_response(),
@@ -110,7 +113,12 @@ fn render_metrics(state: &AppState) -> Result<String, AppStateError> {
 }
 
 fn append_runtime_metrics(lines: &mut Vec<String>, stats: &StatsSnapshot, health: &HealthSnapshot) {
-    append_metric_help(lines, "seahorse_chunk_count", "Active chunk count.", "gauge");
+    append_metric_help(
+        lines,
+        "seahorse_chunk_count",
+        "Active chunk count.",
+        "gauge",
+    );
     lines.push(format!("seahorse_chunk_count {}", stats.chunk_count));
 
     append_metric_help(lines, "seahorse_tag_count", "Tag count.", "gauge");
@@ -172,7 +180,9 @@ fn append_runtime_metrics(lines: &mut Vec<String>, stats: &StatsSnapshot, health
         } else {
             0
         };
-        lines.push(format!("seahorse_health_status{{status=\"{status}\"}} {value}"));
+        lines.push(format!(
+            "seahorse_health_status{{status=\"{status}\"}} {value}"
+        ));
     }
     if !health_status_known {
         lines.push("seahorse_health_status{status=\"unknown\"} 1".to_owned());
@@ -191,7 +201,13 @@ fn escape_label_value(value: &str) -> String {
         .replace('\n', "\\n")
 }
 
-fn map_metrics_error(error: AppStateError) -> (StatusCode, [(axum::http::header::HeaderName, HeaderValue); 1], String) {
+fn map_metrics_error(
+    error: AppStateError,
+) -> (
+    StatusCode,
+    [(axum::http::header::HeaderName, HeaderValue); 1],
+    String,
+) {
     let (status, body) = match error {
         AppStateError::Unavailable { message } => (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -199,7 +215,10 @@ fn map_metrics_error(error: AppStateError) -> (StatusCode, [(axum::http::header:
         ),
         AppStateError::Storage(source) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            format!("# storage error: {}\n", escape_label_value(&source.to_string())),
+            format!(
+                "# storage error: {}\n",
+                escape_label_value(&source.to_string())
+            ),
         ),
         AppStateError::NotFound { message } => (
             StatusCode::NOT_FOUND,
@@ -216,7 +235,10 @@ fn map_metrics_error(error: AppStateError) -> (StatusCode, [(axum::http::header:
 
     (
         status,
-        [(header::CONTENT_TYPE, HeaderValue::from_static(PROMETHEUS_CONTENT_TYPE))],
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static(PROMETHEUS_CONTENT_TYPE),
+        )],
         body,
     )
 }

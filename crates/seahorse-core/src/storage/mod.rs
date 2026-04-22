@@ -7,11 +7,9 @@ pub mod schema;
 pub use error::{StorageError, StorageResult};
 pub use migrations::{apply_sqlite_migrations, LATEST_SCHEMA_VERSION};
 pub use models::{
-    ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, PersistedChunk, PersistedFile,
-    MaintenanceJob, PersistedDeletion, PersistedIngest, PersistedReplacement, RepairTask,
-    RecallChunkRecord, RebuildChunkRecord, StorageStatsSnapshot, TagWrite,
+    ChunkTagInsert, ChunkWrite, FileWrite, IngestWriteBatch, MaintenanceJob, PersistedChunk,
+    PersistedDeletion, PersistedFile, PersistedIngest, PersistedReplacement, RebuildChunkRecord,
+    RecallChunkRecord, RepairTask, StatusCount, StorageStatsSnapshot, TagWrite,
 };
 pub use repository::SqliteRepository;
-pub use schema::{
-    read_schema_meta, validate_schema_meta, SchemaExpectation, SchemaMetaSnapshot,
-};
+pub use schema::{read_schema_meta, validate_schema_meta, SchemaExpectation, SchemaMetaSnapshot};

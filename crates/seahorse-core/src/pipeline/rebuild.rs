@@ -129,8 +129,10 @@ where
 
         match result {
             Ok(result) => {
-                self.repository
-                    .set_schema_meta_value("embedding_model_id", self.embedding_provider.model_id())?;
+                self.repository.set_schema_meta_value(
+                    "embedding_model_id",
+                    self.embedding_provider.model_id(),
+                )?;
                 self.repository.set_schema_meta_value(
                     "embedding_dimension",
                     &self.embedding_provider.dimension().to_string(),
@@ -140,7 +142,9 @@ where
                 Ok(result)
             }
             Err(error) => {
-                let _ = self.repository.set_schema_meta_value("index_state", "degraded");
+                let _ = self
+                    .repository
+                    .set_schema_meta_value("index_state", "degraded");
                 Err(error)
             }
         }
@@ -151,7 +155,10 @@ where
         let entries = self.build_entries(&chunks)?;
         self.vector_index.rebuild(&entries)?;
 
-        let chunk_ids = chunks.iter().map(|chunk| chunk.chunk_id).collect::<Vec<_>>();
+        let chunk_ids = chunks
+            .iter()
+            .map(|chunk| chunk.chunk_id)
+            .collect::<Vec<_>>();
         self.repository.mark_chunks_ready(namespace, &chunk_ids)?;
         self.repository.refresh_file_statuses(namespace)?;
 
@@ -170,7 +177,10 @@ where
             self.vector_index.insert(&entries)?;
         }
 
-        let chunk_ids = chunks.iter().map(|chunk| chunk.chunk_id).collect::<Vec<_>>();
+        let chunk_ids = chunks
+            .iter()
+            .map(|chunk| chunk.chunk_id)
+            .collect::<Vec<_>>();
         self.repository.mark_chunks_ready(namespace, &chunk_ids)?;
         self.repository.refresh_file_statuses(namespace)?;
 
@@ -296,7 +306,12 @@ mod tests {
             .mark_chunks_ready("default", &[persisted.chunks[0].id])
             .expect("mark first chunk ready");
         repository
-            .update_indexing_result(persisted.file.id, &[persisted.chunks[1].id], "partial", "failed")
+            .update_indexing_result(
+                persisted.file.id,
+                &[persisted.chunks[1].id],
+                "partial",
+                "failed",
+            )
             .expect("mark second chunk failed");
 
         let mut pipeline = RebuildPipeline::new(&mut repository, &provider, &mut index);

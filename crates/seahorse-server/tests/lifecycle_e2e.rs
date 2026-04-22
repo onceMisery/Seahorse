@@ -5,8 +5,8 @@ use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt as _;
-use serde_json::{json, Value};
 use seahorse_server::app::build_test_app;
+use serde_json::{json, Value};
 use tower::util::ServiceExt;
 
 const JOB_POLL_ATTEMPTS: usize = 500;
@@ -72,9 +72,9 @@ async fn ingest_recall_forget_rebuild_recall_roundtrip_preserves_soft_delete() {
             .map(|tags| tags.iter().any(|tag| tag == "lifecycle"))
             .unwrap_or(false)
     }));
-    assert!(results_before_forget.iter().any(|item| {
-        item["metadata"]["marker"] == Value::String("orbit-sapphire".to_owned())
-    }));
+    assert!(results_before_forget
+        .iter()
+        .any(|item| { item["metadata"]["marker"] == Value::String("orbit-sapphire".to_owned()) }));
 
     let forget_body = json_request(
         &app,
@@ -108,8 +108,14 @@ async fn ingest_recall_forget_rebuild_recall_roundtrip_preserves_soft_delete() {
     .await;
 
     assert_eq!(recall_after_forget["success"], Value::Bool(true));
-    assert_eq!(recall_after_forget["data"]["results"], Value::Array(Vec::new()));
-    assert_eq!(recall_after_forget["data"]["metadata"]["result_count"], Value::from(0));
+    assert_eq!(
+        recall_after_forget["data"]["results"],
+        Value::Array(Vec::new())
+    );
+    assert_eq!(
+        recall_after_forget["data"]["metadata"]["result_count"],
+        Value::from(0)
+    );
 
     let rebuild_body = json_request(
         &app,
@@ -149,7 +155,10 @@ async fn ingest_recall_forget_rebuild_recall_roundtrip_preserves_soft_delete() {
     .await;
 
     assert_eq!(recall_after_rebuild["success"], Value::Bool(true));
-    assert_eq!(recall_after_rebuild["data"]["results"], Value::Array(Vec::new()));
+    assert_eq!(
+        recall_after_rebuild["data"]["results"],
+        Value::Array(Vec::new())
+    );
     assert_eq!(
         recall_after_rebuild["data"]["metadata"]["index_state"],
         Value::String("ready".to_owned())
@@ -172,8 +181,10 @@ async fn ingest_recall_forget_rebuild_recall_roundtrip_preserves_soft_delete() {
 
     let health_body = json_request(&app, Method::GET, "/health", None).await;
     assert_eq!(health_body["success"], Value::Bool(true));
-    assert_eq!(health_body["data"]["status"], Value::String("ok".to_owned()));
-
+    assert_eq!(
+        health_body["data"]["status"],
+        Value::String("ok".to_owned())
+    );
 }
 
 async fn json_request(app: &Router, method: Method, uri: &str, body: Option<Value>) -> Value {
@@ -207,13 +218,7 @@ async fn raw_request(
 async fn poll_job_until_terminal(app: &Router, job_id: &str) -> Value {
     let mut last_status = String::new();
     for _ in 0..JOB_POLL_ATTEMPTS {
-        let body = json_request(
-            app,
-            Method::GET,
-            &format!("/admin/jobs/{job_id}"),
-            None,
-        )
-        .await;
+        let body = json_request(app, Method::GET, &format!("/admin/jobs/{job_id}"), None).await;
 
         let status = body["data"]["status"].as_str().unwrap_or_default();
         last_status = status.to_owned();

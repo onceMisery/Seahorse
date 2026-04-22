@@ -805,6 +805,60 @@ impl SqliteRepository {
         })
     }
 
+    pub fn load_repair_queue_status_counts(
+        &self,
+        namespace: &str,
+    ) -> StorageResult<Vec<crate::storage::models::StatusCount>> {
+        let mut statement = self.connection.prepare(
+            "SELECT status, COUNT(*)
+             FROM repair_queue
+             WHERE namespace = ?1
+             GROUP BY status
+             ORDER BY status ASC",
+        )?;
+        let rows = statement.query_map([namespace], |row| {
+            Ok(crate::storage::models::StatusCount {
+                status: row.get(0)?,
+                count: row.get::<_, i64>(1)?.max(0) as usize,
+            })
+        })?;
+
+        let mut counts = Vec::new();
+        for row in rows {
+            counts.push(row?);
+        }
+
+        Ok(counts)
+    }
+
+    pub fn load_maintenance_job_status_counts(
+        &self,
+        job_type: &str,
+        namespace: &str,
+    ) -> StorageResult<Vec<crate::storage::models::StatusCount>> {
+        let mut statement = self.connection.prepare(
+            "SELECT status, COUNT(*)
+             FROM maintenance_jobs
+             WHERE job_type = ?1
+               AND namespace = ?2
+             GROUP BY status
+             ORDER BY status ASC",
+        )?;
+        let rows = statement.query_map(params![job_type, namespace], |row| {
+            Ok(crate::storage::models::StatusCount {
+                status: row.get(0)?,
+                count: row.get::<_, i64>(1)?.max(0) as usize,
+            })
+        })?;
+
+        let mut counts = Vec::new();
+        for row in rows {
+            counts.push(row?);
+        }
+
+        Ok(counts)
+    }
+
     fn list_tags_by_chunk_id(&self, chunk_id: i64) -> StorageResult<Vec<String>> {
         let mut statement = self.connection.prepare(
             "SELECT t.normalized_name

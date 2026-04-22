@@ -1,7 +1,10 @@
-use std::fs;
 use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{atomic::{AtomicU64, Ordering}, Mutex, MutexGuard};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex, MutexGuard,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use seahorse_server::{
@@ -30,7 +33,7 @@ fn loads_runtime_config_from_toml() {
 }
 
 #[test]
-fn runtime_config_accepts_legacy_documented_keys() {
+fn runtime_config_rejects_unsupported_documented_keys() {
     let path = write_temp_config(
         r#"
 [storage]
@@ -88,14 +91,11 @@ allow_public_bind = false
 "#,
     );
 
-    let config = load_server_config(&path).unwrap();
-
-    assert_eq!(config.storage.db_path, "./tmp/runtime.db");
-    assert_eq!(config.api.listen_addr(), "127.0.0.1:18080");
-    assert_eq!(config.observability.metrics_path, "/internal/metrics");
-    assert_eq!(config.jobs.repair_max_retries, 5);
-    assert_eq!(config.jobs.repair_batch_size, 2);
-    assert_eq!(config.embedding.dimension, 48);
+    let error = load_server_config(&path).unwrap_err();
+    assert!(
+        error.contains("unsupported config field") || error.contains("unsupported config section"),
+        "unexpected error: {error}"
+    );
 
     cleanup_temp_config(&path);
 }
@@ -201,7 +201,8 @@ fn write_temp_config(contents: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system time before unix epoch")
         .as_millis();
-    let path = std::env::temp_dir().join(format!("seahorse-runtime-config-{millis}-{counter}.toml"));
+    let path =
+        std::env::temp_dir().join(format!("seahorse-runtime-config-{millis}-{counter}.toml"));
     fs::write(&path, contents).expect("write temp config");
     path
 }
