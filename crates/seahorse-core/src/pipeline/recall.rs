@@ -9,6 +9,7 @@ use crate::pipeline::tagging::resolve_tags;
 use crate::storage::{RecallChunkRecord, RetrievalLogWrite, SqliteRepository, StorageError};
 use crate::synapse::{Synapse, SynapseConfig};
 use crate::thalamus::{ThalamicAnalysis, Thalamus, ThalamusConfig};
+use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RecallFilters {
@@ -246,6 +247,39 @@ fn analyze_query_with_thalamus(query_text: &str, top_k: usize) -> ThalamicAnalys
     Thalamus::new(ThalamusConfig::default()).analyze(query_text, top_k)
 }
 
+fn build_spike_association_metadata_json(
+    base_metadata_json: Option<&str>,
+    seed_tags: &[String],
+    matched_tags: &[String],
+    score: f32,
+) -> Option<String> {
+    let mut metadata = match base_metadata_json {
+        Some(json) => match serde_json::from_str::<Value>(json) {
+            Ok(Value::Object(object)) => object,
+            _ => Map::new(),
+        },
+        None => Map::new(),
+    };
+
+    metadata.insert(
+        "seahorse_association".to_owned(),
+        Value::Object(Map::from_iter([
+            ("mode".to_owned(), Value::String("tagmemo".to_owned())),
+            (
+                "seed_tags".to_owned(),
+                Value::Array(seed_tags.iter().cloned().map(Value::String).collect()),
+            ),
+            (
+                "matched_tags".to_owned(),
+                Value::Array(matched_tags.iter().cloned().map(Value::String).collect()),
+            ),
+            ("score".to_owned(), Value::from(f64::from(score))),
+        ])),
+    );
+
+    serde_json::to_string(&Value::Object(metadata)).ok()
+}
+
 fn validate_request(request: &RecallRequest) -> Result<(), RecallError> {
     if request.namespace != "default" {
         return Err(RecallError::InvalidInput {
@@ -395,6 +429,12 @@ fn collect_tagmemo_results(
             .filter_map(|tag| signal_strengths.get(tag))
             .copied()
             .sum::<f32>();
+        let matched_tags = record
+            .tags
+            .iter()
+            .filter(|tag| signal_strengths.contains_key(*tag))
+            .cloned()
+            .collect::<Vec<_>>();
 
         results.push(RecallResultItem {
             chunk_id: record.chunk_id,
@@ -403,7 +443,12 @@ fn collect_tagmemo_results(
             tags: record.tags,
             score,
             source_type: "SpikeAssociation".to_owned(),
-            metadata_json: record.metadata_json,
+            metadata_json: build_spike_association_metadata_json(
+                record.metadata_json.as_deref(),
+                &seed_tags,
+                &matched_tags,
+                score,
+            ),
         });
     }
 
@@ -470,6 +515,7 @@ fn matches_filters(
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
+    use serde_json::Value;
 
     use super::{RecallFilters, RecallMode, RecallPipeline, RecallRequest};
     use crate::embedding::{EmbeddingProvider, EmbeddingResult, StubEmbeddingProvider};
@@ -770,6 +816,63 @@ mod tests {
                     && item.source_type == "SpikeAssociation"),
             "tagmemo should recover the associated rust chunk through connectome"
         );
+    }
+
+    #[test]
+    fn appends_spike_association_metadata_for_tagmemo_results() {
+        let mut repository = repository_with_schema();
+        let provider = StubEmbeddingProvider::from_dimension(4).expect("provider");
+        let mut ingest_index = StaticHitIndex::new(4, Vec::new());
+
+        let mut connectome_request = IngestRequest::new("project rust anchor");
+        connectome_request.filename = "connectome.txt".to_owned();
+        connectome_request.tags = vec!["project".to_owned(), "rust".to_owned()];
+        IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+            .ingest(connectome_request)
+            .expect("seed connectome");
+
+        let mut associated_request = IngestRequest::new("rust compiler deep dive");
+        associated_request.filename = "rust.txt".to_owned();
+        associated_request.tags = vec!["rust".to_owned()];
+        associated_request.metadata_json = Some("{\"kind\":\"rust-note\"}".to_owned());
+        let associated_ingest = IngestPipeline::new(&mut repository, &provider, &mut ingest_index)
+            .ingest(associated_request)
+            .expect("seed associated chunk");
+
+        let recall_index = StaticHitIndex::new(4, Vec::new());
+        let mut request = RecallRequest::new("project");
+        request.mode = RecallMode::TagMemo;
+
+        let result = RecallPipeline::new(&mut repository, &provider, &recall_index)
+            .recall(request)
+            .expect("tagmemo recall");
+        let associated = result
+            .results
+            .iter()
+            .find(|item| item.chunk_id == associated_ingest.chunk_ids[0])
+            .expect("associated result should exist");
+        let metadata = serde_json::from_str::<Value>(
+            associated
+                .metadata_json
+                .as_deref()
+                .expect("association metadata should exist"),
+        )
+        .expect("association metadata should be valid json");
+
+        assert_eq!(metadata["kind"], Value::String("rust-note".to_owned()));
+        assert_eq!(
+            metadata["seahorse_association"]["mode"],
+            Value::String("tagmemo".to_owned())
+        );
+        assert_eq!(
+            metadata["seahorse_association"]["seed_tags"],
+            Value::Array(vec![Value::String("project".to_owned())])
+        );
+        assert_eq!(
+            metadata["seahorse_association"]["matched_tags"],
+            Value::Array(vec![Value::String("rust".to_owned())])
+        );
+        assert!(metadata["seahorse_association"]["score"].is_number());
     }
 
     #[test]
